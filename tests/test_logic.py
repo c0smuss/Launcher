@@ -133,6 +133,28 @@ def test_is_newer_version_garbage_is_false():
     assert ld.is_newer_version(None, "1.3.0") is False
 
 
+# --- save_data skips unchanged writes ---
+
+def test_save_data_skips_unchanged(isolated_files):
+    app = ld.SimLauncherApp.__new__(ld.SimLauncherApp)  # no Tk init needed
+    app._last_saved_payload = None
+    app.data = {"current_profile": "Default", "profiles": {"Default": []}}
+    app.save_data()
+    cfg = isolated_files / "launch_config.json"
+    bak = isolated_files / "launch_config.json.bak"
+    assert cfg.exists()
+    mtime = cfg.stat().st_mtime_ns
+
+    app.save_data()  # identical data → no write, no .bak churn
+    assert cfg.stat().st_mtime_ns == mtime
+    assert not bak.exists()
+
+    app.data["profiles"]["Default"].append({"name": "X", "path": "p"})
+    app.save_data()  # real change → written, previous state backed up
+    assert "\"X\"" in cfg.read_text()
+    assert bak.exists()
+
+
 # --- config schema version ---
 
 def test_config_version_legacy_gets_stamped():

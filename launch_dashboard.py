@@ -1182,6 +1182,7 @@ class SimLauncherApp(ctk.CTk):
         self._closing = False
         self._seq_running = False
         self._ipc_socket = ipc_socket
+        self._last_saved_payload = None
         self.race_mode = False
         self._boosted_pids = []
         self._race_boost_pending = False
@@ -1534,13 +1535,21 @@ class SimLauncherApp(ctk.CTk):
     def save_data(self):
         try:
             self.data["config_version"] = CONFIG_VERSION
+            # Skip the disk write (and .bak churn) when nothing changed — the
+            # 5s autosave loop otherwise rewrites an identical config forever.
+            payload = json.dumps(self.data, indent=2)
+            # Plain attribute (set in __init__), NOT getattr-with-default: a
+            # missing attr on a Tk object detours through Misc.__getattr__
+            if payload == self._last_saved_payload:
+                return
             if os.path.exists(CONFIG_FILE):
                 try:
                     shutil.copy(CONFIG_FILE, f"{CONFIG_FILE}.bak")
                 except Exception:
                     pass
             with open(CONFIG_FILE, 'w') as f:
-                json.dump(self.data, f, indent=2)
+                f.write(payload)
+            self._last_saved_payload = payload
         except Exception as e:
             log_error("save_data", e)
             self.show_toast("Save Failed", "#C0392B")

@@ -4,6 +4,14 @@
 
 A Windows desktop launcher for sim-racing setups. Add your companion apps (telemetry, head tracking, wheel software, overlays), set per-app CPU priority/affinity and launch delays, then start everything with one click.
 
+## What's new in v1.3.1
+- **Snappier UI** — editing or drag-reordering apps now updates rows in place instead of rebuilding the whole list (was a ~¼-second freeze).
+- **Quieter on disk** — the autosave loop no longer rewrites an unchanged config every 5 seconds.
+- **Cheaper monitoring** — crash detection checks the process handle instead of scanning the process table every tick.
+- **Faster launch sequences** — the gap between delay-0 apps is now a setting (default 0.75 s, was a fixed 1.5 s), and nothing waits after the last app; a full stack launches in about half the time.
+- **Crash detection now covers admin-launched apps** — watching begins once the app is first seen running (Windows provides no exit code for elevated launches, so only exits within ~30 s of appearing count as crashes).
+- Fixed: the profile ⋮ menu now follows monitor DPI scaling and the app theme; a leaked menu per ⋮ click; back-to-back toasts being hidden early by the previous toast's timer.
+
 ## What's new in v1.3
 - **One-click race day** — a `🏁 iRacing` desktop shortcut selects the iRacing profile, launches the whole stack, and sits in the tray, announcing completion with a native notification. Runs the app via CLI flags (`--profile`, `--launch`, `--minimized`).
 - **Single instance** — launching a second time forwards to the running launcher instead of opening a duplicate that fights over the config.

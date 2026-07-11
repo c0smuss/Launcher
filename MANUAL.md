@@ -1,4 +1,4 @@
-/Launch User Manual — v1.3
+/Launch User Manual — v1.3.1
 
 Overview
 /Launch is a Windows desktop utility that manages and sequences the launch of sim‑racing applications and supporting tools. It provides per‑app CPU priority, affinity and Efficiency Mode, optional admin launches (UAC), delayed launch sequencing, profiles, race-day automation, global hotkeys, crash detection, and usage statistics.
@@ -69,8 +69,8 @@ Process Management
 Crash Detection
 - The app optionally monitors launched apps for unexpected exits (crashes).
 - An exit is only treated as a crash when the process ended with a non-zero exit code. Closing an app normally is not recorded as a crash.
-- For apps where no exit code is available (e.g. admin launches), only runs shorter than 30 seconds are treated as crashes.
-- When a crash is detected, an entry (including the exit code) is added to crash_history.json and the app shows a notification.
+- Admin-launched apps (UAC) are monitored too: watching begins once the app is first seen running (so time spent on the UAC prompt can't be mistaken for a crash). Windows provides no exit code for elevated launches, so for these only exits within ~30 seconds of appearing are treated as crashes.
+- When a crash is detected, an entry (including the exit code where available) is added to crash_history.json and the app shows a notification.
 - Crash detection continues while /Launch is minimized to the tray (checked every 10 seconds).
 - Note: automatic restart of crashed apps is not yet implemented; crashes are detected and recorded only.
 
@@ -145,4 +145,4 @@ Appendix — Safe Defaults & Warnings
 - Realtime priority can make a system unstable if misused. The app will warn when selecting dangerous options, but use caution and keep backups of your config.
 - Always test new affinity/priority settings with a short session before committing to long races.
 
-This manual documents v1.3 features and usage. For more advanced automation (plugins, REST API, remote telemetry) refer to future releases.
+This manual documents v1.3.1 features and usage. For more advanced automation (plugins, REST API, remote telemetry) refer to future releases.

@@ -1,0 +1,1259 @@
+import customtkinter as ctk
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog
+import os
+import subprocess
+import json
+import threading
+import time
+import psutil
+import logging
+import traceback
+import shutil
+import ctypes
+from PIL import Image, ImageDraw
+import pystray
+import queue
+from typing import Optional, Tuple
+import win32process
+import ctypes.wintypes
+from dataclasses import dataclass
+from enum import Enum
+from datetime import datetime
+import asyncio
+import hashlib
+import webbrowser
+from pathlib import Path
+from collections import defaultdict
+import winreg
+import sys
+
+# --- GLOBAL CONSTANTS ---
+APP_NAME = "/Launch"
+VERSION = "1.1.0"
+
+# Anchor all data files to the script's folder so launching from a different
+# working directory (e.g. a shortcut) doesn't create a fresh empty config.
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = str(BASE_DIR / "launch_config.json")
+LOG_FILE = str(BASE_DIR / "app.log")
+
+# Files created by analytics / settings
+SETTINGS_FILE = str(BASE_DIR / "launcher_settings.json")
+CRASH_LOG_FILE = str(BASE_DIR / "crash_history.json")
+STATS_FILE = str(BASE_DIR / "app_statistics.json")
+
+DEFAULT_SETTINGS = {
+    "theme": "Dark",
+    "auto_save_interval": 5000,
+    "monitor_interval": 2000,
+    "startup_apps": [],
+    "minimize_on_launch": False,
+    "check_updates": True,
+    "crash_detection": True,
+    "sound_notifications": False,
+    "keyboard_shortcuts": {
+        "launch_seq": "<Control-l>",
+        "kill_all": "<Control-k>",
+        "minimize": "<Control-m>"
+    }
+}
+
+# CPU Priority Map
+PRIORITY_MAP = {
+    "Realtime": psutil.REALTIME_PRIORITY_CLASS,
+    "High": psutil.HIGH_PRIORITY_CLASS,
+    "Above Normal": psutil.ABOVE_NORMAL_PRIORITY_CLASS,
+    "Normal": psutil.NORMAL_PRIORITY_CLASS,
+    "Below Normal": psutil.BELOW_NORMAL_PRIORITY_CLASS,
+    "Idle": psutil.IDLE_PRIORITY_CLASS
+}
+
+# --- LOGGING ---
+logging.basicConfig(filename=LOG_FILE, level=logging.ERROR, format='%(asctime)s:%(levelname)s:%(message)s')
+
+def log_error(context, e):
+    print(f"Error in {context}: {e}")
+    logging.error(f"Error in {context}: {str(e)}\n{traceback.format_exc()}")
+
+# --- ICON UTILITIES ---
+try:
+    import win32ui
+    import win32gui
+    import win32con
+    import win32api
+    HAS_WIN32 = True
+except ImportError:
+    HAS_WIN32 = False
+
+def get_icon_from_exe(path, size=32):
+    if not HAS_WIN32 or not os.path.exists(path):
+        return get_placeholder_icon(size)
+    try:
+        large, small = win32gui.ExtractIconEx(path, 0)
+        hicon = small[0] if small else (large[0] if large else None)
+        if not hicon:
+            return get_placeholder_icon(size)
+
+        hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
+        hbmp = win32ui.CreateBitmap()
+        hbmp.CreateCompatibleBitmap(hdc, size, size)
+        hdc = hdc.CreateCompatibleDC()
+        hdc.SelectObject(hbmp)
+        win32gui.DrawIconEx(hdc.GetHandleOutput(), 0, 0, hicon, size, size, 0, None, 0x0003)
+
+        bmpinfo = hbmp.GetInfo()
+        bmpstr = hbmp.GetBitmapBits(True)
+        img = Image.frombuffer('RGB', (bmpinfo['bmWidth'], bmpinfo['bmHeight']), bmpstr, 'raw', 'BGRX', 0, 1)
+        win32gui.DestroyIcon(hicon)
+        return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+    except Exception:
+        return get_placeholder_icon(size)
+
+def get_placeholder_icon(size=32, color=(70, 130, 180)):
+    img = Image.new('RGB', (size, size), color=color)
+    return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
+
+def create_tray_icon_image():
+    width = 64; height = 64
+    image = Image.new('RGB', (width, height), (30, 30, 30))
+    dc = ImageDraw.Draw(image)
+    dc.polygon([(20, 16), (20, 48), (48, 32)], fill=(46, 204, 113))
+    return image
+
+# --- PROCESS UTILITIES ---
+
+def is_app_running(exe_path: str) -> Tuple[bool, Optional[psutil.Process]]:
+    """Return (running, psutil.Process) by matching normalized exe path."""
+    if not exe_path:
+        return False, None
+    norm_target = os.path.normpath(exe_path).lower()
+    try:
+        for proc in psutil.process_iter(['exe', 'name', 'pid']):
+            try:
+                p_path = proc.info.get('exe')
+                if p_path and os.path.normpath(p_path).lower() == norm_target:
+                    return True, proc
+            except (psutil.NoSuchProcess, psutil.AccessDenied, FileNotFoundError):
+                continue
+    except Exception as e:
+        log_error("is_app_running", e)
+    return False, None
+
+def kill_app(exe_path):
+    running, proc = is_app_running(exe_path)
+    if running and proc:
+        try:
+            proc.terminate()
+            return True
+        except Exception as e:
+            log_error("kill_app", e)
+    return False
+
+def launch_executable(app_data: dict) -> Optional[subprocess.Popen]:
+    """Handles launching logic including Admin requests."""
+    path = app_data.get('path')
+    if not path:
+        raise FileNotFoundError("No path provided")
+    cwd = os.path.dirname(path) or None
+    run_as_admin = app_data.get('admin', False)
+
+    if run_as_admin:
+        # ShellExecute triggers UAC prompt; no PID returned
+        try:
+            ret = ctypes.windll.shell32.ShellExecuteW(None, "runas", path, "", cwd or '.', 1)
+            if isinstance(ret, int) and ret <= 32:
+                raise Exception(f"ShellExecute failed with code {ret}")
+            return None
+        except Exception as e:
+            log_error("launch_executable.admin", e)
+            raise
+    else:
+        # Standard Launch
+        try:
+            return subprocess.Popen([path], cwd=cwd)
+        except Exception as e:
+            log_error("launch_executable", e)
+            raise
+
+def get_process_memory_usage(proc: psutil.Process) -> int:
+    """Get memory in MB."""
+    try:
+        return proc.memory_info().rss // (1024 * 1024)
+    except Exception:
+        return 0
+
+def get_process_cpu_usage(proc: psutil.Process) -> float:
+    """Get CPU percentage. Non-blocking: measures since the previous call
+    on the same Process object (first call returns 0.0)."""
+    try:
+        return proc.cpu_percent(interval=None)
+    except Exception:
+        return 0.0
+
+def kill_app_gracefully(exe_path: str, timeout: int = 5) -> bool:
+    """Kill app with terminate first, then kill."""
+    running, proc = is_app_running(exe_path)
+    if not running or not proc:
+        return False
+
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=timeout)
+            return True
+        except psutil.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return True
+    except Exception as e:
+        log_error("kill_app_gracefully", e)
+        return False
+
+def apply_performance_settings(proc: psutil.Process, app_data: dict) -> bool:
+    """Apply priority and affinity to a running process."""
+    if not proc:
+        return False
+    success = True
+    try:
+        p_name = app_data.get('priority', 'Normal')
+        if p_name in PRIORITY_MAP:
+            try:
+                proc.nice(PRIORITY_MAP[p_name])
+            except PermissionError:
+                log_error("Priority", "Access denied - may need admin")
+                success = False
+        affinity = app_data.get('affinity', []) or []
+        if affinity:
+            max_cores = psutil.cpu_count()
+            valid = [c for c in affinity if 0 <= c < max_cores]
+            if valid:
+                try:
+                    proc.cpu_affinity(valid)
+                except PermissionError:
+                    log_error("Affinity", "Access denied")
+                    success = False
+    except Exception as e:
+        log_error(f"Apply Settings {app_data.get('name')}", e)
+        return False
+    return success
+
+def apply_settings_after_admin_launch(parent, exe_path: str, app_data: dict, delay_ms: int = 2000, max_retries: int = 10):
+    """Retry applying settings after admin-launched app starts (ShellExecute)."""
+    def retry(attempt=0):
+        running, proc = is_app_running(exe_path)
+        if proc:
+            apply_performance_settings(proc, app_data)
+            return
+        if attempt < max_retries and parent.winfo_exists():
+            parent.after(delay_ms, lambda: retry(attempt + 1))
+    parent.after(delay_ms, retry)
+
+# --- CONFIG MANAGEMENT ---
+@dataclass
+class AppConfig:
+    name: str
+    path: str
+    delay: int = 0
+    priority: str = "Normal"
+    affinity: list = None
+    admin: bool = False
+    enabled: bool = True
+    last_run: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            'name': self.name,
+            'path': self.path,
+            'delay': self.delay,
+            'priority': self.priority,
+            'affinity': self.affinity or [],
+            'admin': self.admin,
+            'enabled': self.enabled,
+            'last_run': self.last_run
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'AppConfig':
+        filtered = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
+        return cls(**filtered)
+
+# --- PROCESS TRACKER ---
+class ProcessTracker:
+    """Cache running exe paths -> process for fast lookups."""
+    def __init__(self, refresh_interval=1.0):
+        self.cache = {}  # norm_path -> (True, proc)
+        self.refresh_interval = refresh_interval
+        self.last_update = 0.0
+        self.lock = threading.Lock()
+
+    def get_app_status(self, exe_path: str) -> Tuple[bool, Optional[psutil.Process]]:
+        now = time.time()
+        if now - self.last_update > self.refresh_interval:
+            self._refresh_cache()
+            self.last_update = now
+        norm = os.path.normpath(exe_path).lower() if exe_path else ""
+        with self.lock:
+            entry = self.cache.get(norm)
+            return entry if entry else (False, None)
+
+    def _refresh_cache(self):
+        with self.lock:
+            old_cache = self.cache
+            new_cache = {}
+            try:
+                for proc in psutil.process_iter(['exe', 'pid']):
+                    try:
+                        exe = proc.info.get('exe')
+                        if exe:
+                            norm = os.path.normpath(exe).lower()
+                            # store only first match; psutil.Process object is live
+                            if norm not in new_cache:
+                                prev = old_cache.get(norm)
+                                # Reuse the old Process object when the PID is unchanged
+                                # so cpu_percent(interval=None) keeps its baseline.
+                                if prev and prev[1].pid == proc.pid:
+                                    new_cache[norm] = prev
+                                else:
+                                    new_cache[norm] = (True, proc)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, FileNotFoundError):
+                        continue
+            except Exception as e:
+                log_error("ProcessTracker._refresh_cache", e)
+            self.cache = new_cache
+
+# --- EDIT DIALOG ---
+class AppSettingsDialog(ctk.CTkToplevel):
+    def __init__(self, parent, app_data, callback):
+        super().__init__(parent)
+        self.title("Edit App Settings")
+        self.geometry("550x750")
+        self.app_data = app_data
+        self.callback = callback
+        self.transient(parent)
+        self.grab_set()
+        self.resizable(False, False)
+
+        main_scroll = ctk.CTkScrollableFrame(self)
+        main_scroll.pack(fill="both", expand=True, padx=20, pady=20)
+
+        self._section("General Info", main_scroll)
+        self.entry_name = self._add_field(main_scroll, "Name:", app_data.get('name', ''))
+
+        path_frame = ctk.CTkFrame(main_scroll, fg_color="transparent")
+        path_frame.pack(fill="x", pady=5)
+        ctk.CTkLabel(path_frame, text="Path:").pack(anchor="w")
+        path_input_frame = ctk.CTkFrame(path_frame, fg_color="transparent")
+        path_input_frame.pack(fill="x")
+        self.entry_path = ctk.CTkEntry(path_input_frame)
+        self.entry_path.insert(0, app_data.get('path', ''))
+        self.entry_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        ctk.CTkButton(path_input_frame, text="Browse", width=80, command=self._browse_path).pack(side="right")
+
+        self.entry_delay = self._add_field(main_scroll, "Delay (seconds):", str(app_data.get('delay', 0)))
+        self.var_admin = ctk.BooleanVar(value=app_data.get('admin', False))
+        self.var_enabled = ctk.BooleanVar(value=app_data.get('enabled', True))
+        ctk.CTkCheckBox(main_scroll, text="Run as Administrator (UAC Prompt)", variable=self.var_admin).pack(anchor="w", pady=5)
+        ctk.CTkCheckBox(main_scroll, text="Enabled", variable=self.var_enabled).pack(anchor="w", pady=5)
+
+        self._section("Performance Tuning", main_scroll)
+        ctk.CTkLabel(main_scroll, text="CPU Priority:").pack(anchor="w", pady=(10, 5))
+        self.combo_priority = ctk.CTkOptionMenu(main_scroll, values=list(PRIORITY_MAP.keys()))
+        self.combo_priority.set(app_data.get('priority', 'Normal'))
+        self.combo_priority.pack(fill="x", pady=5)
+
+        ctk.CTkLabel(main_scroll, text="CPU Affinity:", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
+        affinity_btn_frame = ctk.CTkFrame(main_scroll, fg_color="transparent")
+        affinity_btn_frame.pack(fill="x", pady=5)
+
+        ctk.CTkButton(affinity_btn_frame, text="All", width=50, height=25, 
+                     command=lambda: [c.select() for c in self.core_checks]).pack(side="left", padx=2)
+        ctk.CTkButton(affinity_btn_frame, text="None", width=50, height=25,
+                     command=lambda: [c.deselect() for c in self.core_checks]).pack(side="left", padx=2)
+        ctk.CTkButton(affinity_btn_frame, text="P-Cores Only", width=100, height=25,
+                     command=self._select_p_cores).pack(side="left", padx=2)
+        ctk.CTkButton(affinity_btn_frame, text="E-Cores Only", width=100, height=25,
+                     command=self._select_e_cores).pack(side="left", padx=2)
+
+        # create core checkboxes after determining core count
+        self.affinity_frame = ctk.CTkScrollableFrame(main_scroll, height=150)
+        self.affinity_frame.pack(fill="x", pady=5)
+        self.core_checks = []
+        saved_aff = app_data.get('affinity', []) or []
+        p_core_count = psutil.cpu_count(logical=False) or 0
+        total_cores = psutil.cpu_count() or 1
+
+        for i in range(total_cores):
+            core_type = "P-Core" if i < p_core_count else "E-Core"
+            chk = ctk.CTkCheckBox(self.affinity_frame, text=f"CPU {i} ({core_type})")
+            chk.pack(anchor="w")
+            if not saved_aff or i in saved_aff:
+                chk.select()
+            else:
+                chk.deselect()
+            self.core_checks.append(chk)
+
+        # --- BUTTONS ---
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(pady=15, fill="x", padx=20)
+        ctk.CTkButton(btn_row, text="Save", command=self.save, fg_color="#27AE60", width=150).pack(side="left", padx=5)
+        ctk.CTkButton(btn_row, text="Cancel", command=self.destroy, fg_color="#C0392B", width=150).pack(side="right", padx=5)
+
+    def _section(self, title: str, parent):
+        """Add a section header."""
+        ctk.CTkLabel(parent, text=title, font=("Roboto", 14, "bold")).pack(anchor="w", pady=(15, 5))
+
+    def _add_field(self, parent, label: str, value: str):
+        """Add labeled entry field."""
+        ctk.CTkLabel(parent, text=label).pack(anchor="w", pady=(5, 0))
+        entry = ctk.CTkEntry(parent)
+        entry.insert(0, value)
+        entry.pack(fill="x", pady=5)
+        return entry
+
+    def _browse_path(self):
+        """Browse for executable."""
+        path = filedialog.askopenfilename(filetypes=[("Executables", "*.exe"), ("All", "*.*")])
+        if path:
+            self.entry_path.delete(0, "end")
+            self.entry_path.insert(0, path)
+
+    def _select_p_cores(self):
+        """Select only P-cores."""
+        p_core_count = psutil.cpu_count(logical=False)
+        for i, c in enumerate(self.core_checks):
+            if i < p_core_count:
+                c.select()
+            else:
+                c.deselect()
+
+    def _select_e_cores(self):
+        """Select only E-cores."""
+        p_core_count = psutil.cpu_count(logical=False)
+        for i, c in enumerate(self.core_checks):
+            if i >= p_core_count:
+                c.select()
+            else:
+                c.deselect()
+
+    def save(self):
+        """Validate and save."""
+        try:
+            delay = float(self.entry_delay.get())
+            if delay < 0:
+                raise ValueError("Delay cannot be negative")
+        except ValueError as e:
+            messagebox.showerror("Error", f"Invalid delay: {str(e)}")
+            return
+        if not os.path.exists(self.entry_path.get()):
+            messagebox.showerror("Error", "Executable path does not exist")
+            return
+        sel_cores = [i for i, c in enumerate(self.core_checks) if c.get()]
+        if len(sel_cores) == len(self.core_checks):
+            sel_cores = []
+        # Start from the existing data so fields without UI (e.g. auto_restart,
+        # last_run) survive an edit instead of being silently dropped.
+        new_data = dict(self.app_data)
+        new_data.update({
+            "name": self.entry_name.get().strip() or "Unknown",
+            "path": self.entry_path.get(),
+            "delay": int(delay),
+            "priority": self.combo_priority.get(),
+            "affinity": sel_cores,
+            "admin": self.var_admin.get(),
+            "enabled": self.var_enabled.get()
+        })
+        self.callback(new_data)
+        self.destroy()
+
+# --- UI ROWS ---
+class DraggableRow(ctk.CTkFrame):
+    def __init__(self, parent, app_data, actions, index, **kwargs):
+        super().__init__(parent, corner_radius=8, fg_color=("gray90", "#2B2B2B"), **kwargs)
+        self.app_data = app_data
+        self.index = index
+        self.actions = actions
+        self.last_state = None
+        self.last_pid = None
+        self.grid_columnconfigure(2, weight=1)
+        self.lbl_status = ctk.CTkLabel(self, text="○", font=("Arial", 16), text_color="gray")
+        self.lbl_status.grid(row=0, column=0, padx=(10, 5), pady=10)
+        self.icon_image = get_icon_from_exe(app_data.get('path'))
+        self.lbl_icon = ctk.CTkLabel(self, text="", image=self.icon_image)
+        self.lbl_icon.grid(row=0, column=1, padx=5, pady=10)
+        self.info_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.info_frame.grid(row=0, column=2, sticky="ew", padx=5)
+        name_txt = app_data.get('name', 'Unknown')
+        if app_data.get('admin'):
+            name_txt += " 🔐"
+        if not app_data.get('enabled', True):
+            name_txt += " (Disabled)"
+        self.lbl_name = ctk.CTkLabel(self.info_frame, text=name_txt, font=("Roboto Medium", 14), anchor="w")
+        self.lbl_name.pack(fill="x")
+        meta = f"Wait: {app_data.get('delay')}s | {app_data.get('priority')}"
+        self.lbl_meta = ctk.CTkLabel(self.info_frame, text=meta, font=("Roboto", 10), text_color="gray", anchor="w")
+        self.lbl_meta.pack(fill="x")
+        self.lbl_stats = ctk.CTkLabel(self.info_frame, text="", font=("Roboto", 9), text_color="#888888", anchor="w")
+        self.lbl_stats.pack(fill="x")
+        self.ctrl_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.ctrl_frame.grid(row=0, column=3, padx=5)
+        self.btn_edit = ctk.CTkButton(self.ctrl_frame, text="⚙", width=30, height=30, fg_color="#34495E", command=lambda: self.actions['edit'](self))
+        self.btn_edit.pack(side="left", padx=2)
+        self.btn_play = ctk.CTkButton(self.ctrl_frame, text="▶", width=30, height=30, fg_color="#27AE60", command=lambda: self.actions['launch_one'](self.app_data))
+        self.btn_play.pack(side="left", padx=2)
+        self.btn_stop = ctk.CTkButton(self.ctrl_frame, text="■", width=30, height=30, fg_color="#E74C3C", command=lambda: self.actions['kill_one'](self.app_data.get('path')))
+        self.btn_stop.pack(side="left", padx=2)
+        self.lbl_drag = ctk.CTkLabel(self, text="≡", font=("Arial", 20), cursor="hand2")
+        self.lbl_drag.grid(row=0, column=4, padx=5)
+        self.btn_del = ctk.CTkButton(self, text="×", width=30, height=30, fg_color="transparent", hover_color="#C0392B", border_width=1, command=lambda: self.actions['delete'](self))
+        self.btn_del.grid(row=0, column=5, padx=5)
+        for w in [self, self.lbl_name, self.lbl_meta, self.lbl_drag, self.info_frame, self.lbl_status]:
+            w.bind("<Button-1>", self.on_drag_start)
+            w.bind("<ButtonRelease-1>", self.on_drag_end)
+        self.update_visuals(is_running=False, force=True)
+
+    def update_visuals(self, is_running: bool, proc: Optional[psutil.Process] = None, force: bool = False):
+        if not force and is_running == self.last_state:
+            if is_running and proc:
+                self._update_stats(proc)
+            return
+        self.last_state = is_running
+        try:
+            if is_running:
+                self.lbl_status.configure(text="●", text_color="#2ECC71")
+                self.btn_stop.pack(side="left", padx=2)
+                self.btn_play.pack_forget()
+                self.btn_del.configure(state="disabled")
+                self.btn_edit.configure(state="disabled")
+                if proc:
+                    self._update_stats(proc)
+            else:
+                self.lbl_status.configure(text="○", text_color="gray")
+                self.lbl_stats.configure(text="")
+                self.btn_stop.pack_forget()
+                self.btn_play.pack(side="left", padx=2)
+                self.btn_del.configure(state="normal")
+                self.btn_edit.configure(state="normal")
+        except Exception:
+            pass
+
+    def _update_stats(self, proc: psutil.Process):
+        try:
+            mem = get_process_memory_usage(proc)
+            cpu = get_process_cpu_usage(proc)
+            self.lbl_stats.configure(text=f"Mem: {mem}MB | CPU: {cpu:.1f}%")
+        except Exception:
+            pass
+
+    def on_drag_start(self, event):
+        self.actions['drag_start'](self, event)
+
+    def on_drag_end(self, event):
+        self.actions['drag_end'](self, event)
+
+# --- CRASH DETECTION & STATISTICS ---
+class CrashDetector:
+    def __init__(self):
+        self.crash_history = self._load_crash_history()
+        self.watch_list = {}
+
+    def _load_crash_history(self) -> dict:
+        if os.path.exists(CRASH_LOG_FILE):
+            try:
+                with open(CRASH_LOG_FILE, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                return defaultdict(list)
+        return defaultdict(list)
+
+    def _save_crash_history(self):
+        try:
+            with open(CRASH_LOG_FILE, 'w') as f:
+                json.dump(dict(self.crash_history), f, indent=2)
+        except Exception as e:
+            log_error("save_crash_history", e)
+
+    def register_app(self, exe_path: str, pid: int, name: str = None, popen: Optional[subprocess.Popen] = None,
+                     auto_restart: bool = False, max_retries: int = 3):
+        self.watch_list[exe_path] = {
+            'pid': pid,
+            'name': name or os.path.basename(exe_path),
+            'popen': popen,
+            'started': time.time(),
+            'retries': 0,
+            'auto_restart': auto_restart,
+            'max_retries': max_retries
+        }
+
+    def check_crashes(self, callback_on_crash=None):
+        crashed = []
+        for exe_path, data in list(self.watch_list.items()):
+            running, _ = is_app_running(exe_path)
+            if not running:
+                del self.watch_list[exe_path]
+                runtime = time.time() - data['started']
+                popen = data.get('popen')
+                if popen is not None:
+                    # Exit code 0 = user closed the app normally, not a crash
+                    exit_code = popen.poll()
+                    is_crash = exit_code is not None and exit_code != 0
+                else:
+                    # No exit code available; only treat very short runs as crashes
+                    exit_code = None
+                    is_crash = runtime < 30
+                if not is_crash:
+                    continue
+                crash_record = {
+                    'app': data['name'],
+                    'timestamp': datetime.now().isoformat(),
+                    'runtime_seconds': runtime,
+                    'exit_code': exit_code,
+                    'retry_count': data['retries']
+                }
+                self.crash_history.setdefault(exe_path, []).append(crash_record)
+                crashed.append((exe_path, data, runtime))
+        if crashed:
+            self._save_crash_history()
+            if callback_on_crash:
+                callback_on_crash(crashed)
+        return crashed
+
+class AppStatistics:
+    def __init__(self):
+        self.stats = self._load_stats()
+
+    def _load_stats(self) -> dict:
+        if os.path.exists(STATS_FILE):
+            try:
+                with open(STATS_FILE, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _save_stats(self):
+        try:
+            with open(STATS_FILE, 'w') as f:
+                json.dump(self.stats, f, indent=2)
+        except Exception as e:
+            log_error("save_stats", e)
+
+    def record_launch(self, app_name: str):
+        if app_name not in self.stats:
+            self.stats[app_name] = {
+                'total_launches': 0,
+                'total_runtime_seconds': 0,
+                'avg_runtime': 0,
+                'first_launched': None,
+                'last_launched': None,
+                'crashes': 0
+            }
+        s = self.stats[app_name]
+        s['total_launches'] += 1
+        s['last_launched'] = datetime.now().isoformat()
+        if not s['first_launched']:
+            s['first_launched'] = s['last_launched']
+        self._save_stats()
+
+    def record_runtime(self, app_name: str, runtime_seconds: float):
+        if app_name in self.stats:
+            s = self.stats[app_name]
+            s['total_runtime_seconds'] += runtime_seconds
+            s['avg_runtime'] = s['total_runtime_seconds'] / s['total_launches'] if s['total_launches'] else 0
+            self._save_stats()
+
+    def record_crash(self, app_name: str):
+        if app_name in self.stats:
+            self.stats[app_name]['crashes'] += 1
+            self._save_stats()
+
+    def get_stats(self, app_name: str) -> dict:
+        s = self.stats.get(app_name)
+        if not s:
+            return {}
+        return {
+            'launches': s['total_launches'],
+            'avg_runtime': f"{s['avg_runtime']:.0f}s" if s.get('avg_runtime') else "N/A",
+            'crashes': s.get('crashes', 0),
+            'last_run': s['last_launched'][-8:] if s.get('last_launched') else "Never"
+        }
+
+# --- HOTKEY & PROFILE ASSISTANT (unchanged) ---
+class HotkeyManager:
+    def __init__(self):
+        self.hotkeys = {}
+    def register(self, hotkey_str: str, callback):
+        try:
+            import keyboard
+            keyboard.add_hotkey(hotkey_str, callback)
+            self.hotkeys[hotkey_str] = callback
+            return True
+        except ImportError:
+            log_error("HotkeyManager", "keyboard module not installed")
+            return False
+    def unregister_all(self):
+        try:
+            import keyboard
+            for hk in list(self.hotkeys.keys()):
+                keyboard.remove_hotkey(hk)
+        except Exception:
+            pass
+
+class ProfileAssistant:
+    def __init__(self):
+        self.launch_history = []
+    def record_launch_combo(self, app_names: list):
+        combo_hash = hashlib.md5(','.join(sorted(app_names)).encode()).hexdigest()[:8]
+        self.launch_history.append({'timestamp': datetime.now().isoformat(), 'apps': app_names, 'hash': combo_hash})
+    def suggest_profile(self) -> tuple:
+        if len(self.launch_history) < 3:
+            return False, "", []
+        combos = defaultdict(int)
+        for record in self.launch_history[-20:]:
+            combos[record['hash']] += 1
+        if not combos:
+            return False, "", []
+        most_common = max(combos, key=combos.get)
+        for record in self.launch_history:
+            if record['hash'] == most_common and combos[most_common] >= 3:
+                return True, f"Suggested Profile ({combos[most_common]}x)", record['apps']
+        return False, "", []
+
+# --- SETTINGS DIALOG ---
+class SettingsDialog(ctk.CTkToplevel):
+    def __init__(self, parent, settings, callback):
+        super().__init__(parent)
+        self.title("Settings")
+        self.geometry("600x500")
+        self.transient(parent)
+        self.grab_set()
+        self.settings = settings
+        self.callback = callback
+        scroll = ctk.CTkScrollableFrame(self)
+        scroll.pack(fill="both", expand=True, padx=20, pady=20)
+        ctk.CTkLabel(scroll, text="Theme:", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
+        theme_var = ctk.StringVar(value=settings.get('theme', 'Dark'))
+        ctk.CTkOptionMenu(scroll, values=["Light", "Dark", "System"], variable=theme_var).pack(fill="x", pady=5)
+        ctk.CTkLabel(scroll, text="Monitor Interval (ms):", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
+        entry_monitor = ctk.CTkEntry(scroll)
+        entry_monitor.insert(0, str(settings.get('monitor_interval', 2000)))
+        entry_monitor.pack(fill="x", pady=5)
+        ctk.CTkLabel(scroll, text="Reliability:", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
+        var_crash = ctk.BooleanVar(value=settings.get('crash_detection', True))
+        ctk.CTkCheckBox(scroll, text="Enable crash detection & recovery", variable=var_crash).pack(anchor="w", pady=5)
+        var_autosave = ctk.BooleanVar(value=settings.get('auto_save_interval', 5000) > 0)
+        ctk.CTkCheckBox(scroll, text="Auto-save config every 5 seconds", variable=var_autosave).pack(anchor="w", pady=5)
+        var_sound = ctk.BooleanVar(value=settings.get('sound_notifications', False))
+        ctk.CTkCheckBox(scroll, text="Sound notifications", variable=var_sound).pack(anchor="w", pady=5)
+        var_minimize = ctk.BooleanVar(value=settings.get('minimize_on_launch', False))
+        ctk.CTkCheckBox(scroll, text="Minimize app when launching sequence", variable=var_minimize).pack(anchor="w", pady=5)
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(pady=15, fill="x", padx=20)
+        def save_settings():
+            settings['theme'] = theme_var.get()
+            try:
+                settings['monitor_interval'] = int(entry_monitor.get() or 2000)
+            except ValueError:
+                settings['monitor_interval'] = 2000
+            settings['crash_detection'] = var_crash.get()
+            settings['auto_save_interval'] = 5000 if var_autosave.get() else 0
+            settings['sound_notifications'] = var_sound.get()
+            settings['minimize_on_launch'] = var_minimize.get()
+            self.callback(settings)
+            self.destroy()
+        ctk.CTkButton(btn_frame, text="Save", command=save_settings, fg_color="#27AE60", width=150).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="Cancel", command=self.destroy, fg_color="#C0392B", width=150).pack(side="right", padx=5)
+
+# --- ENHANCED ROW WITH STATS ---
+class EnhancedDraggableRow(DraggableRow):
+    def __init__(self, parent, app_data, actions, index, stats: AppStatistics = None, **kwargs):
+        super().__init__(parent, app_data, actions, index, **kwargs)
+        self.stats = stats
+        self.start_time = None
+
+    def update_visuals(self, is_running: bool, proc: Optional[psutil.Process] = None, force: bool = False):
+        prev = self.last_state
+        super().update_visuals(is_running, proc, force)
+        try:
+            if is_running and not self.start_time:
+                self.start_time = time.time()
+            if not is_running and self.start_time:
+                runtime = time.time() - self.start_time
+                if self.stats:
+                    self.stats.record_runtime(self.app_data['name'], runtime)
+                self.start_time = None
+        except Exception:
+            pass
+
+# --- MAIN APP ---
+class SimLauncherApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.report_callback_exception = self.show_error_popup
+        self.title(f"{APP_NAME} v{VERSION}")
+        self.geometry("750x900")
+        self.minsize(600, 700)
+        ctk.set_appearance_mode("Dark")
+        self.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
+        self.data = {"current_profile": "Default", "profiles": {"Default": []}}
+        self.settings = self._load_settings()
+        self.process_tracker = ProcessTracker()
+        self.crash_detector = CrashDetector()
+        self.app_stats = AppStatistics()
+        self.profile_assistant = ProfileAssistant()
+        self.hotkey_manager = HotkeyManager()
+        self.load_data()
+        self.create_widgets()
+        self.toast_lbl = ctk.CTkLabel(self, text="", height=30, corner_radius=10, fg_color="#333333", text_color="white")
+        self.drag_data = {"item": None}
+        self.ui_queue = queue.Queue()
+        self._poll_ui_queue()
+        self.refresh_list_ui()
+        self.monitor_processes()
+        self.setup_autosave()
+        self.setup_hotkeys()
+
+    def ui_call(self, fn, *args, **kwargs):
+        """Schedule a callable to run on the Tk main thread. Tkinter is not
+        thread-safe, so worker/tray threads must route UI work through this."""
+        self.ui_queue.put((fn, args, kwargs))
+
+    def _poll_ui_queue(self):
+        try:
+            while True:
+                fn, args, kwargs = self.ui_queue.get_nowait()
+                try:
+                    fn(*args, **kwargs)
+                except Exception as e:
+                    log_error("ui_call", e)
+        except queue.Empty:
+            pass
+        if self.winfo_exists():
+            self.after(100, self._poll_ui_queue)
+
+    def _load_settings(self) -> dict:
+        if os.path.exists(SETTINGS_FILE):
+            try:
+                with open(SETTINGS_FILE, 'r') as f:
+                    loaded = json.load(f)
+                    return {**DEFAULT_SETTINGS, **loaded}
+            except Exception:
+                log_error("_load_settings", "Failed to read settings")
+        return DEFAULT_SETTINGS.copy()
+
+    def _save_settings(self):
+        try:
+            with open(SETTINGS_FILE, 'w') as f:
+                json.dump(self.settings, f, indent=2)
+        except Exception as e:
+            log_error("save_settings", e)
+
+    def setup_autosave(self):
+        # Cancel any previous loop so re-saving settings doesn't stack loops
+        if getattr(self, '_autosave_after_id', None):
+            try:
+                self.after_cancel(self._autosave_after_id)
+            except Exception:
+                pass
+            self._autosave_after_id = None
+        interval = self.settings.get('auto_save_interval', 0)
+        if interval > 0:
+            def autosave():
+                try:
+                    self.save_data()
+                finally:
+                    if self.winfo_exists():
+                        self._autosave_after_id = self.after(interval, autosave)
+            self._autosave_after_id = self.after(interval, autosave)
+
+    def setup_hotkeys(self):
+        keys = self.settings.get('keyboard_shortcuts', {})
+        # optional: register hotkeys if keyboard module available
+
+    def show_error_popup(self, exc, val, tb):
+        log_error("Fatal", val)
+        messagebox.showerror("Error", f"An error occurred:\n{str(val)}\n\nCheck {LOG_FILE} for details.")
+
+    def show_toast(self, message: str, color: str = "#333333", duration: int = 3000):
+        try:
+            self.toast_lbl.configure(text=message, fg_color=color)
+            self.toast_lbl.place(relx=0.5, rely=0.95, anchor="center")
+            self.toast_lbl.lift()
+            self.after(duration, lambda: (self.toast_lbl.place_forget() if self.winfo_exists() else None))
+        except Exception:
+            pass
+
+    def create_widgets(self):
+        self.header = ctk.CTkFrame(self, height=90, fg_color="#1a1a1a", corner_radius=0)
+        self.header.pack(fill="x")
+        self.header.pack_propagate(False)
+        left_header = ctk.CTkFrame(self.header, fg_color="transparent")
+        left_header.pack(side="left", padx=20, pady=10)
+        ctk.CTkLabel(left_header, text=APP_NAME, font=("Montserrat", 26, "bold")).pack()
+        ctk.CTkLabel(left_header, text=f"v{VERSION}", font=("Roboto", 10), text_color="gray").pack(anchor="w")
+        self.profile_frame = ctk.CTkFrame(self.header, fg_color="transparent")
+        self.profile_frame.pack(side="right", padx=20, pady=15)
+        ctk.CTkLabel(self.profile_frame, text="Profile:", font=("Roboto", 11)).pack(side="left", padx=5)
+        self.profile_var = ctk.StringVar(value=self.data["current_profile"])
+        self.combo_profiles = ctk.CTkOptionMenu(self.profile_frame, values=self.get_profile_names(), variable=self.profile_var, command=self.change_profile, width=160)
+        self.combo_profiles.pack(side="left", padx=5)
+        ctk.CTkButton(self.profile_frame, text="+", width=35, fg_color="#27AE60", command=self.add_profile).pack(side="left", padx=2)
+        ctk.CTkButton(self.profile_frame, text="−", width=35, fg_color="#E74C3C", command=self.delete_profile).pack(side="left", padx=2)
+        ctk.CTkButton(self.profile_frame, text="⚙", width=35, fg_color="#34495E", command=self.open_settings).pack(side="left", padx=2)
+        self.actions = ctk.CTkFrame(self, fg_color="transparent")
+        self.actions.pack(fill="x", padx=20, pady=12)
+        ctk.CTkButton(self.actions, text="➕ Add App", command=self.add_app, fg_color="#34495E", width=120).pack(side="left", padx=5)
+        self.btn_launch_seq = ctk.CTkButton(self.actions, text="🚀 LAUNCH SEQUENCE", fg_color="#27AE60", hover_color="#2ECC71", command=self.launch_sequence, font=("Roboto", 14, "bold"))
+        self.btn_launch_seq.pack(side="left", padx=20, fill="x", expand=True)
+        ctk.CTkButton(self.actions, text="☠ KILL ALL", fg_color="#C0392B", hover_color="#E74C3C", command=self.kill_all, width=100).pack(side="right", padx=5)
+        self.scroll = ctk.CTkScrollableFrame(self, label_text="Apps")
+        self.scroll.pack(fill="both", expand=True, padx=20, pady=10)
+
+    def open_settings(self):
+        def save_settings(new_settings):
+            self.settings = new_settings
+            self._save_settings()
+            self.setup_autosave()
+            self.show_toast("Settings saved", "#27AE60")
+        SettingsDialog(self, self.settings, save_settings)
+
+    def load_data(self):
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    loaded = json.load(f)
+                    self.data.update(loaded)
+            except Exception as e:
+                log_error("load_data", e)
+                # Preserve the broken file under a separate name — never touch
+                # the .bak, which holds the last known-good config.
+                corrupt_copy = f"{CONFIG_FILE}.corrupt-{datetime.now():%Y%m%d-%H%M%S}"
+                try:
+                    shutil.copy(CONFIG_FILE, corrupt_copy)
+                except Exception:
+                    pass
+                restored = False
+                backup = f"{CONFIG_FILE}.bak"
+                if os.path.exists(backup):
+                    try:
+                        with open(backup, 'r') as f:
+                            self.data.update(json.load(f))
+                        restored = True
+                    except Exception as e2:
+                        log_error("load_data.backup", e2)
+                if restored:
+                    messagebox.showwarning("Warning", f"Config corrupted — restored from backup.\nBroken file saved as {os.path.basename(corrupt_copy)}.")
+                else:
+                    messagebox.showwarning("Warning", f"Config corrupted and no usable backup found.\nBroken file saved as {os.path.basename(corrupt_copy)}.")
+        if self.data["current_profile"] not in self.data["profiles"]:
+            self.data["current_profile"] = list(self.data["profiles"].keys())[0]
+
+    def save_data(self):
+        try:
+            if os.path.exists(CONFIG_FILE):
+                try:
+                    shutil.copy(CONFIG_FILE, f"{CONFIG_FILE}.bak")
+                except Exception:
+                    pass
+            with open(CONFIG_FILE, 'w') as f:
+                json.dump(self.data, f, indent=2)
+        except Exception as e:
+            log_error("save_data", e)
+            self.show_toast("Save Failed", "#C0392B")
+
+    def get_current_apps(self) -> list:
+        return self.data["profiles"][self.data["current_profile"]]
+
+    def get_profile_names(self) -> list:
+        return list(self.data["profiles"].keys())
+
+    def change_profile(self, new_p: str):
+        self.data["current_profile"] = new_p
+        self.save_data()
+        self.refresh_list_ui()
+
+    def add_profile(self):
+        name = simpledialog.askstring("New Profile", "Profile Name:", parent=self)
+        if name and name.strip():
+            name = name.strip()
+            if name in self.data["profiles"]:
+                messagebox.showwarning("Warning", "Profile already exists")
+                return
+            self.data["profiles"][name] = []
+            self.data["current_profile"] = name
+            self.combo_profiles.configure(values=self.get_profile_names())
+            self.profile_var.set(name)
+            self.save_data()
+            self.refresh_list_ui()
+            self.show_toast(f"Profile '{name}' created", "#27AE60")
+
+    def delete_profile(self):
+        if self.data["current_profile"] == "Default":
+            messagebox.showwarning("Warning", "Cannot delete Default profile")
+            return
+        if messagebox.askyesno("Confirm", f"Delete '{self.data['current_profile']}'?"):
+            del self.data["profiles"][self.data["current_profile"]]
+            self.data["current_profile"] = "Default"
+            self.combo_profiles.configure(values=self.get_profile_names())
+            self.profile_var.set("Default")
+            self.save_data()
+            self.refresh_list_ui()
+            self.show_toast("Profile deleted", "#C0392B")
+
+    def add_app(self):
+        path = filedialog.askopenfilename(filetypes=[("Executables", "*.exe"), ("All Files", "*.*")], parent=self)
+        if path:
+            name = os.path.splitext(os.path.basename(path))[0]
+            self.get_current_apps().append({
+                "name": name,
+                "path": os.path.abspath(path),
+                "delay": 0,
+                "priority": "Normal",
+                "affinity": [],
+                "admin": False,
+                "enabled": True,
+                "last_run": None,
+                "auto_restart": False
+            })
+            self.save_data()
+            self.refresh_list_ui()
+            self.show_toast(f"Added {name}", "#27AE60")
+
+    def edit_app_row(self, row):
+        def save(new_d):
+            self.get_current_apps()[row.index] = new_d
+            self.save_data()
+            self.refresh_list_ui()
+            self.show_toast("Settings saved", "#27AE60")
+        AppSettingsDialog(self, self.get_current_apps()[row.index], save)
+
+    def delete_app_row(self, row):
+        app_name = self.get_current_apps()[row.index].get('name', 'App')
+        if messagebox.askyesno("Confirm", f"Delete {app_name}?"):
+            del self.get_current_apps()[row.index]
+            self.save_data()
+            self.refresh_list_ui()
+            self.show_toast(f"Deleted {app_name}", "#C0392B")
+
+    def launch_one(self, app_data: dict):
+        if not app_data.get('enabled', True):
+            self.show_toast("App is disabled", "#E67E22")
+            return
+        if is_app_running(app_data.get('path'))[0]:
+            self.show_toast(f"{app_data['name']} already running", "#E67E22")
+            return
+        try:
+            self.app_stats.record_launch(app_data['name'])
+            proc = launch_executable(app_data)
+            self.show_toast(f"Launching {app_data['name']}...", "#2980B9")
+            if proc:
+                try:
+                    apply_performance_settings(psutil.Process(proc.pid), app_data)
+                    if self.settings.get('crash_detection'):
+                        self.crash_detector.register_app(app_data.get('path'), proc.pid, name=app_data.get('name'),
+                                                         popen=proc, auto_restart=app_data.get('auto_restart', False))
+                except Exception as e:
+                    log_error("Performance settings", e)
+            else:
+                apply_settings_after_admin_launch(self, app_data.get('path'), app_data, delay_ms=2000)
+            app_data['last_run'] = datetime.now().isoformat()
+            self.save_data()
+        except Exception as e:
+            log_error("launch_one", e)
+            self.show_toast("Launch failed", "#C0392B")
+        self.after(500, self.monitor_processes_once)
+
+    def launch_sequence(self):
+        apps = self.get_current_apps()
+        enabled_apps = [a for a in apps if a.get('enabled', True)]
+        if not enabled_apps:
+            self.show_toast("No enabled apps", "#E67E22")
+            return
+        if self.settings.get('minimize_on_launch'):
+            self.withdraw()
+        self.btn_launch_seq.configure(state="disabled")
+        # The worker thread must not touch Tk directly; UI work goes via ui_call
+        def run_seq():
+            launched = 0
+            self.profile_assistant.record_launch_combo([a['name'] for a in enabled_apps])
+            for app in enabled_apps:
+                if is_app_running(app.get('path'))[0]:
+                    self.ui_call(self.show_toast, f"{app['name']} already running, skipping", "#E67E22")
+                    continue
+                if not os.path.exists(app['path']):
+                    self.ui_call(self.show_toast, f"{app['name']} not found", "#C0392B")
+                    continue
+                try:
+                    self.app_stats.record_launch(app['name'])
+                    self.ui_call(self.show_toast, f"Starting {app['name']}...", "#2980B9")
+                    proc = launch_executable(app)
+                    if proc:
+                        try:
+                            apply_performance_settings(psutil.Process(proc.pid), app)
+                            if self.settings.get('crash_detection'):
+                                self.crash_detector.register_app(app.get('path'), proc.pid, name=app.get('name'),
+                                                                 popen=proc, auto_restart=app.get('auto_restart', False))
+                        except Exception:
+                            pass
+                    else:
+                        self.ui_call(apply_settings_after_admin_launch, self, app.get('path'), app, 2000)
+                    launched += 1
+                    app['last_run'] = datetime.now().isoformat()
+                except Exception as e:
+                    log_error(f"Seq {app['name']}", e)
+                delay = app.get('delay', 0)
+                time.sleep(delay if delay > 0 else 1.5)
+            def finish():
+                self.save_data()
+                self.show_toast(f"Sequence complete! Launched {launched} apps", "#27AE60")
+                self.btn_launch_seq.configure(state="normal")
+                self.after(500, self.monitor_processes_once)
+            self.ui_call(finish)
+        threading.Thread(target=run_seq, daemon=True).start()
+
+    def kill_one(self, exe_path: str):
+        # kill_app_gracefully can block up to 5s waiting on the process,
+        # so run it off the UI thread
+        def worker():
+            kill_app_gracefully(exe_path)
+            self.ui_call(self.monitor_processes_once)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def kill_all(self):
+        apps = list(self.get_current_apps())
+        if messagebox.askyesno("Confirm", "Stop all running apps?"):
+            def worker():
+                count = sum(1 for app in apps if kill_app_gracefully(app.get('path')))
+                self.ui_call(self.show_toast, f"Stopped {count} apps", "#C0392B")
+                self.ui_call(self.monitor_processes_once)
+            threading.Thread(target=worker, daemon=True).start()
+
+    def monitor_processes(self):
+        minimized = getattr(self, 'is_minimized_to_tray', False)
+        delay = 10000 if minimized else self.settings.get('monitor_interval', 2000)
+        if not minimized:
+            # Row visuals only matter while the window is visible
+            self.monitor_processes_once()
+        if self.settings.get('crash_detection'):
+            try:
+                self.crash_detector.check_crashes(self.on_app_crashed)
+            except Exception as e:
+                log_error("monitor_processes.crash_check", e)
+        if self.winfo_exists():
+            self.after(delay, self.monitor_processes)
+
+    def on_app_crashed(self, crashed_apps: list):
+        for exe_path, data, runtime in crashed_apps:
+            # Use the configured app name so it matches the stats key
+            app_name = data.get('name', os.path.basename(exe_path))
+            self.app_stats.record_crash(app_name)
+            self.show_toast(f"⚠ {app_name} crashed after {runtime:.0f}s", "#E74C3C", duration=5000)
+
+    def monitor_processes_once(self):
+        try:
+            for w in self.scroll.winfo_children():
+                if isinstance(w, (DraggableRow, EnhancedDraggableRow)):
+                    running, proc = self.process_tracker.get_app_status(w.app_data.get('path'))
+                    w.update_visuals(running, proc)
+        except Exception as e:
+            log_error("monitor_processes_once", e)
+
+    def minimize_to_tray(self):
+        self.withdraw()
+        self.is_minimized_to_tray = True
+        threading.Thread(target=self.run_tray, daemon=True).start()
+
+    def run_tray(self):
+        menu = pystray.Menu(pystray.MenuItem("Show", self.restore), pystray.MenuItem("Exit", self.quit_app))
+        self.tray_icon = pystray.Icon("SL", create_tray_icon_image(), "/Launch", menu)
+        try:
+            self.tray_icon.run()
+        except Exception as e:
+            log_error("run_tray", e)
+
+    def restore(self, i=None, item=None):
+        # Runs on the pystray thread — Tk work must go through ui_call
+        try:
+            if getattr(self, 'tray_icon', None):
+                self.tray_icon.stop()
+        except Exception:
+            pass
+        def do_restore():
+            self.deiconify()
+            self.is_minimized_to_tray = False
+            self.monitor_processes_once()
+        self.ui_call(do_restore)
+
+    def quit_app(self, i=None, item=None):
+        # Runs on the pystray thread — Tk work must go through ui_call
+        self.hotkey_manager.unregister_all()
+        try:
+            if getattr(self, 'tray_icon', None):
+                self.tray_icon.stop()
+        except Exception:
+            pass
+        self.ui_call(self.destroy)
+
+    def refresh_list_ui(self):
+        for w in self.scroll.winfo_children():
+            w.destroy()
+        actions = {
+            'delete': self.delete_app_row,
+            'edit': self.edit_app_row,
+            'launch_one': self.launch_one,
+            'kill_one': self.kill_one,
+            'drag_start': self.drag_start,
+            'drag_end': self.drag_end
+        }
+        apps = self.get_current_apps()
+        if not apps:
+            ctk.CTkLabel(self.scroll, text="No apps added. Click '+Add App' to get started!", text_color="gray", font=("Roboto", 12)).pack(pady=50)
+            return
+        for i, app in enumerate(apps):
+            EnhancedDraggableRow(self.scroll, app, actions, i, stats=self.app_stats).pack(fill="x", pady=2, padx=2)
+
+    def drag_start(self, w, e):
+        self.drag_data["item"] = w
+        w.configure(fg_color="#404040")
+
+    def drag_end(self, w, e):
+        if not self.drag_data["item"]:
+            return
+        src = self.drag_data["item"]
+        src.configure(fg_color=("gray90", "#2B2B2B"))
+        y = self.scroll.winfo_pointery() - self.scroll.winfo_rooty()
+        rows = [x for x in self.scroll.winfo_children() if isinstance(x, (DraggableRow, EnhancedDraggableRow))]
+        new_idx = len(rows) - 1
+        cy = 0
+        for i, r in enumerate(rows):
+            if y < cy + r.winfo_height() / 2:
+                new_idx = i
+                break
+            cy += r.winfo_height()
+        if src.index != new_idx:
+            l = self.get_current_apps()
+            l.insert(new_idx, l.pop(src.index))
+            self.save_data()
+            self.refresh_list_ui()
+        self.drag_data["item"] = None
+
+def validate_app_data(app):
+    required = ['name', 'path', 'delay', 'priority', 'affinity', 'admin']
+    return all(k in app for k in required)
+
+class NotificationManager:
+    def __init__(self, parent):
+        self.parent = parent
+        self.queue = []
+
+    def show(self, msg, color="#333333", duration=3000):
+        lbl = ctk.CTkLabel(self.parent, text=msg, height=30, corner_radius=10, fg_color=color, text_color="white")
+        lbl.place(relx=0.5, rely=0.95, anchor="center")
+        self.parent.after(duration, lambda: (lbl.destroy() if lbl.winfo_exists() else None))
+
+if __name__ == "__main__":
+    app = SimLauncherApp()
+    app.mainloop()
+
+
+

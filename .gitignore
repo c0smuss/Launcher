@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+
+# User data (machine-specific, may contain personal paths/profiles)
+launch_config.json
+launch_config.json.*
+launcher_settings.json
+app_statistics.json
+crash_history.json
+app.log
+
+# Old snapshot kept locally only
+Launch-v1/

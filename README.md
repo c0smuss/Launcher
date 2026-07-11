@@ -2,6 +2,13 @@
 
 A Windows desktop launcher for sim-racing setups. Add your companion apps (telemetry, head tracking, wheel software, overlays), set per-app CPU priority/affinity and launch delays, then start everything with one click.
 
+## What's new in v1.2
+- **Efficiency Mode (EcoQoS)** — per-app opt-in to Windows 11 power throttling: the scheduler runs the app on E-cores at low clocks (shows as "Efficiency mode" in Task Manager). Ideal for background helpers, leaving P-cores and thermal headroom to the sim. Configured in the app's ⚙ settings; eco apps show a 🍃 tag.
+- **The launcher itself runs in Efficiency Mode** by default (toggle in Settings), minimizing its own footprint while you race.
+- **Quit button (⏻)** in the header — exit directly without going through the tray menu.
+- Fixed a "can't invoke winfo command" error dialog that could appear when quitting from the tray.
+- Desktop shortcut now uses `pythonw.exe` (no console window) and the rocket icon; the app shows its own icon in the taskbar and tray instead of Python's.
+
 ## What's new in v1.1
 - **Accurate crash detection** — apps closed normally (exit code 0) are no longer recorded as crashes; crash records now include the exit code.
 - **Safe config recovery** — if `launch_config.json` is corrupted, the broken file is preserved as `launch_config.json.corrupt-<timestamp>` and the config is automatically restored from the `.bak` backup (which is never overwritten by a bad file).

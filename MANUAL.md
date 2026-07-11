@@ -40,6 +40,7 @@ App Settings (per app)
 - Delay: Seconds to wait after launching this app before starting the next in a sequence.
 - Priority: Windows process priority (Realtime, High, Normal, etc.). Use Realtime with caution.
 - Affinity: Select CPU cores to restrict the process (useful for separating game vs background processes).
+- Efficiency Mode (EcoQoS): Opts the app into Windows 11 power throttling — the scheduler prefers E-cores at low clock speeds and Task Manager shows "Efficiency mode". Great for background helpers (paint downloaders, daemons); avoid for latency-sensitive apps like head tracking. Requires Windows 11 (silently ignored on older versions). Eco apps show a 🍃 tag in their row.
 - Run as Administrator: When checked, launching that app will trigger a UAC prompt (ShellExecute). Note: no PID is returned from ShellExecute, so some settings may be applied after the process starts (retry logic included).
 - Enabled: Toggle to disable an app without removing it.
 
@@ -79,6 +80,7 @@ Accessible from the header ⚙:
 - Auto-save interval: Periodic saving of config (ms).
 - Sound notifications: Play sounds for important events (requires system audio support).
 - Minimize on launch: Minimize app during launch sequences.
+- Run launcher in Efficiency Mode (EcoQoS): On by default — /Launch itself is scheduled on E-cores at low power so it stays out of the sim's way. Takes effect immediately when toggled.
 
 Logs & Troubleshooting
 - All data files (config, settings, logs, statistics) are stored in the same folder as launch_dashboard.py, regardless of the working directory the app was started from.

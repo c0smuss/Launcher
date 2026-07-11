@@ -30,7 +30,7 @@ import sys
 
 # --- GLOBAL CONSTANTS ---
 APP_NAME = "/Launch"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 # Anchor all data files to the script's folder so launching from a different
 # working directory (e.g. a shortcut) doesn't create a fresh empty config.
@@ -50,6 +50,7 @@ DEFAULT_SETTINGS = {
     "monitor_interval": 2000,
     "startup_apps": [],
     "minimize_on_launch": False,
+    "launcher_eco_mode": True,
     "check_updates": True,
     "crash_detection": True,
     "sound_notifications": False,
@@ -216,6 +217,59 @@ def kill_app_gracefully(exe_path: str, timeout: int = 5) -> bool:
         log_error("kill_app_gracefully", e)
         return False
 
+# --- ECOQOS (Windows 11 Power Throttling) ---
+PROCESS_POWER_THROTTLING_CURRENT_VERSION = 1
+PROCESS_POWER_THROTTLING_EXECUTION_SPEED = 0x1
+PROCESS_SET_INFORMATION = 0x0200
+ProcessPowerThrottling = 4  # PROCESS_INFORMATION_CLASS value
+
+class PROCESS_POWER_THROTTLING_STATE(ctypes.Structure):
+    _fields_ = [
+        ("Version", ctypes.wintypes.ULONG),
+        ("ControlMask", ctypes.wintypes.ULONG),
+        ("StateMask", ctypes.wintypes.ULONG),
+    ]
+
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+# Explicit prototypes: without them ctypes passes HANDLE as a 32-bit int,
+# which truncates the 64-bit pseudo-handle and fails with ERROR_INVALID_HANDLE
+_kernel32.GetCurrentProcess.restype = ctypes.wintypes.HANDLE
+_kernel32.OpenProcess.restype = ctypes.wintypes.HANDLE
+_kernel32.OpenProcess.argtypes = [ctypes.wintypes.DWORD, ctypes.wintypes.BOOL, ctypes.wintypes.DWORD]
+_kernel32.SetProcessInformation.restype = ctypes.wintypes.BOOL
+_kernel32.SetProcessInformation.argtypes = [ctypes.wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, ctypes.wintypes.DWORD]
+_kernel32.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+
+def set_eco_qos(pid: Optional[int] = None, enable: bool = True) -> bool:
+    """Apply EcoQoS (Task Manager's "Efficiency mode") to a process: the
+    scheduler prefers E-cores at low clocks. pid=None targets this process.
+    Returns False on older Windows or insufficient access."""
+    try:
+        kernel32 = _kernel32
+        close_handle = False
+        if pid is None:
+            handle = kernel32.GetCurrentProcess()
+        else:
+            handle = kernel32.OpenProcess(PROCESS_SET_INFORMATION, False, int(pid))
+            if not handle:
+                return False
+            close_handle = True
+        try:
+            state = PROCESS_POWER_THROTTLING_STATE(
+                Version=PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+                ControlMask=PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+                StateMask=PROCESS_POWER_THROTTLING_EXECUTION_SPEED if enable else 0,
+            )
+            ok = kernel32.SetProcessInformation(handle, ProcessPowerThrottling,
+                                                ctypes.byref(state), ctypes.sizeof(state))
+            return bool(ok)
+        finally:
+            if close_handle:
+                kernel32.CloseHandle(handle)
+    except Exception as e:
+        log_error("set_eco_qos", e)
+        return False
+
 def apply_performance_settings(proc: psutil.Process, app_data: dict) -> bool:
     """Apply priority and affinity to a running process."""
     if not proc:
@@ -239,6 +293,10 @@ def apply_performance_settings(proc: psutil.Process, app_data: dict) -> bool:
                 except PermissionError:
                     log_error("Affinity", "Access denied")
                     success = False
+        if app_data.get('eco_mode'):
+            if not set_eco_qos(proc.pid):
+                log_error("EcoQoS", f"Could not enable efficiency mode for {app_data.get('name')}")
+                success = False
     except Exception as e:
         log_error(f"Apply Settings {app_data.get('name')}", e)
         return False
@@ -371,6 +429,12 @@ class AppSettingsDialog(ctk.CTkToplevel):
         self.combo_priority.set(app_data.get('priority', 'Normal'))
         self.combo_priority.pack(fill="x", pady=5)
 
+        self.var_eco = ctk.BooleanVar(value=app_data.get('eco_mode', False))
+        ctk.CTkCheckBox(main_scroll, text="Efficiency Mode (EcoQoS) — run on E-cores at low power",
+                        variable=self.var_eco).pack(anchor="w", pady=5)
+        ctk.CTkLabel(main_scroll, text="Good for background helpers; don't use on latency-sensitive apps.",
+                     font=("Roboto", 10), text_color="gray").pack(anchor="w")
+
         ctk.CTkLabel(main_scroll, text="CPU Affinity:", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
         affinity_btn_frame = ctk.CTkFrame(main_scroll, fg_color="transparent")
         affinity_btn_frame.pack(fill="x", pady=5)
@@ -470,7 +534,8 @@ class AppSettingsDialog(ctk.CTkToplevel):
             "priority": self.combo_priority.get(),
             "affinity": sel_cores,
             "admin": self.var_admin.get(),
-            "enabled": self.var_enabled.get()
+            "enabled": self.var_enabled.get(),
+            "eco_mode": self.var_eco.get()
         })
         self.callback(new_data)
         self.destroy()
@@ -500,6 +565,8 @@ class DraggableRow(ctk.CTkFrame):
         self.lbl_name = ctk.CTkLabel(self.info_frame, text=name_txt, font=("Roboto Medium", 14), anchor="w")
         self.lbl_name.pack(fill="x")
         meta = f"Wait: {app_data.get('delay')}s | {app_data.get('priority')}"
+        if app_data.get('eco_mode'):
+            meta += " | 🍃 Eco"
         self.lbl_meta = ctk.CTkLabel(self.info_frame, text=meta, font=("Roboto", 10), text_color="gray", anchor="w")
         self.lbl_meta.pack(fill="x")
         self.lbl_stats = ctk.CTkLabel(self.info_frame, text="", font=("Roboto", 9), text_color="#888888", anchor="w")
@@ -756,6 +823,10 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkCheckBox(scroll, text="Sound notifications", variable=var_sound).pack(anchor="w", pady=5)
         var_minimize = ctk.BooleanVar(value=settings.get('minimize_on_launch', False))
         ctk.CTkCheckBox(scroll, text="Minimize app when launching sequence", variable=var_minimize).pack(anchor="w", pady=5)
+        ctk.CTkLabel(scroll, text="Performance:", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
+        var_launcher_eco = ctk.BooleanVar(value=settings.get('launcher_eco_mode', True))
+        ctk.CTkCheckBox(scroll, text="Run launcher in Efficiency Mode (EcoQoS) — leaves more CPU for the sim",
+                        variable=var_launcher_eco).pack(anchor="w", pady=5)
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(pady=15, fill="x", padx=20)
         def save_settings():
@@ -768,6 +839,7 @@ class SettingsDialog(ctk.CTkToplevel):
             settings['auto_save_interval'] = 5000 if var_autosave.get() else 0
             settings['sound_notifications'] = var_sound.get()
             settings['minimize_on_launch'] = var_minimize.get()
+            settings['launcher_eco_mode'] = var_launcher_eco.get()
             self.callback(settings)
             self.destroy()
         ctk.CTkButton(btn_frame, text="Save", command=save_settings, fg_color="#27AE60", width=150).pack(side="left", padx=5)
@@ -815,6 +887,8 @@ class SimLauncherApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
         self.data = {"current_profile": "Default", "profiles": {"Default": []}}
         self.settings = self._load_settings()
+        if self.settings.get('launcher_eco_mode', True):
+            set_eco_qos()
         self.process_tracker = ProcessTracker()
         self.crash_detector = CrashDetector()
         self.app_stats = AppStatistics()
@@ -948,6 +1022,7 @@ class SimLauncherApp(ctk.CTk):
             self.settings = new_settings
             self._save_settings()
             self.setup_autosave()
+            set_eco_qos(enable=self.settings.get('launcher_eco_mode', True))
             self.show_toast("Settings saved", "#27AE60")
         SettingsDialog(self, self.settings, save_settings)
 
@@ -1046,6 +1121,7 @@ class SimLauncherApp(ctk.CTk):
                 "affinity": [],
                 "admin": False,
                 "enabled": True,
+                "eco_mode": False,
                 "last_run": None,
                 "auto_restart": False
             })

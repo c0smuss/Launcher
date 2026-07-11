@@ -1003,7 +1003,7 @@ class SimLauncherApp(ctk.CTk):
             if profile:
                 match = self._match_profile(profile)
                 if not match:
-                    self.show_toast(f"Profile '{profile}' not found", "#E67E22")
+                    self.notify(f"Profile '{profile}' not found", "#E67E22")
                     return
                 self.change_profile(match)
             self.launch_sequence()
@@ -1073,6 +1073,18 @@ class SimLauncherApp(ctk.CTk):
             self.after(duration, lambda: (self.toast_lbl.place_forget() if self._alive() else None))
         except Exception:
             pass
+
+    def notify(self, message: str, color: str = "#333333", duration: int = 3000):
+        """In-window toast when visible; native tray notification when minimized.
+        Use for events that matter while trayed (sequence done, crashes, race
+        mode). Callers may race the tray-thread startup — falls back to toast."""
+        if getattr(self, 'is_minimized_to_tray', False) and getattr(self, 'tray_icon', None):
+            try:
+                self.tray_icon.notify(message, APP_NAME)
+                return
+            except Exception as e:
+                log_error("tray_notify", e)
+        self.show_toast(message, color, duration)
 
     def create_widgets(self):
         self.header = ctk.CTkFrame(self, height=90, fg_color="#1a1a1a", corner_radius=0)
@@ -1282,14 +1294,14 @@ class SimLauncherApp(ctk.CTk):
             self.save_data()
         except Exception as e:
             log_error("launch_one", e)
-            self.show_toast("Launch failed", "#C0392B")
+            self.notify("Launch failed", "#C0392B")
         self.after(500, self.monitor_processes_once)
 
     def launch_sequence(self):
         # INV-1: button, hotkey, tray menu, IPC, and --launch all reach here;
         # the disabled button no longer guards re-entry, so gate on a flag.
         if self._seq_running:
-            self.show_toast("Sequence already running", "#E67E22")
+            self.notify("Sequence already running", "#E67E22")
             return
         apps = self.get_current_apps()
         enabled_apps = [a for a in apps if a.get('enabled', True)]
@@ -1339,7 +1351,7 @@ class SimLauncherApp(ctk.CTk):
                 logging.info(f"Launch sequence complete: launched {launched} apps")
                 def finish():
                     self.save_data()
-                    self.show_toast(f"Sequence complete! Launched {launched} apps", "#27AE60")
+                    self.notify(f"Sequence complete! Launched {launched} apps", "#27AE60")
                     self.btn_launch_seq.configure(state="normal")
                     self.after(500, self.monitor_processes_once)
                 self.ui_call(finish)
@@ -1358,7 +1370,7 @@ class SimLauncherApp(ctk.CTk):
         if messagebox.askyesno("Confirm", "Stop all running apps?"):
             def worker():
                 count = sum(1 for app in apps if kill_app_gracefully(app.get('path')))
-                self.ui_call(self.show_toast, f"Stopped {count} apps", "#C0392B")
+                self.ui_call(self.notify, f"Stopped {count} apps", "#C0392B")
                 self.ui_call(self.monitor_processes_once)
             threading.Thread(target=worker, daemon=True).start()
 
@@ -1381,7 +1393,7 @@ class SimLauncherApp(ctk.CTk):
             # Use the configured app name so it matches the stats key
             app_name = data.get('name', os.path.basename(exe_path))
             self.app_stats.record_crash(app_name)
-            self.show_toast(f"⚠ {app_name} crashed after {runtime:.0f}s", "#E74C3C", duration=5000)
+            self.notify(f"⚠ {app_name} crashed after {runtime:.0f}s", "#E74C3C", duration=5000)
 
     def monitor_processes_once(self):
         try:

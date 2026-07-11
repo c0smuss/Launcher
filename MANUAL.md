@@ -20,7 +20,7 @@ First run
 - The default profile ("Default") is created automatically.
 
 UI Overview
-- Header: App name, version, profile selector, profile add/delete, Settings (⚙).
+- Header: App name, version, profile selector, profile add/delete, Settings (⚙), Quit (⏻).
 - Add App: Click "➕ Add App" and choose an executable (.exe).
 - App Rows: Each app is shown as a row with icon, name, metadata (delay/priority), and controls:
   - ⚙: Edit settings for the app.
@@ -68,6 +68,7 @@ App Statistics
 Tray & Hotkeys
 - Closing the window minimizes the app to the system tray.
 - Tray menu provides Show and Exit options.
+- The ⏻ button in the header exits the app directly without going through the tray. Launched apps keep running.
 - Global hotkeys are supported via the optional 'keyboard' package (not installed by default). Hotkeys are configurable in Settings when keyboard support is present.
 
 Settings

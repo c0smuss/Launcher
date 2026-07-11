@@ -251,8 +251,11 @@ def apply_settings_after_admin_launch(parent, exe_path: str, app_data: dict, del
         if proc:
             apply_performance_settings(proc, app_data)
             return
-        if attempt < max_retries and parent.winfo_exists():
-            parent.after(delay_ms, lambda: retry(attempt + 1))
+        try:
+            if attempt < max_retries and parent.winfo_exists():
+                parent.after(delay_ms, lambda: retry(attempt + 1))
+        except tk.TclError:
+            pass
     parent.after(delay_ms, retry)
 
 # --- CONFIG MANAGEMENT ---
@@ -795,6 +798,7 @@ class EnhancedDraggableRow(DraggableRow):
 class SimLauncherApp(ctk.CTk):
     def __init__(self):
         super().__init__()
+        self._closing = False
         self.report_callback_exception = self.show_error_popup
         self.title(f"{APP_NAME} v{VERSION}")
         try:
@@ -827,6 +831,17 @@ class SimLauncherApp(ctk.CTk):
         self.setup_autosave()
         self.setup_hotkeys()
 
+    def _alive(self) -> bool:
+        """True while the window exists and isn't shutting down. winfo_exists
+        raises TclError once the app is destroyed, so it can't be called bare
+        in after-callbacks."""
+        if self._closing:
+            return False
+        try:
+            return bool(self.winfo_exists())
+        except tk.TclError:
+            return False
+
     def ui_call(self, fn, *args, **kwargs):
         """Schedule a callable to run on the Tk main thread. Tkinter is not
         thread-safe, so worker/tray threads must route UI work through this."""
@@ -842,7 +857,7 @@ class SimLauncherApp(ctk.CTk):
                     log_error("ui_call", e)
         except queue.Empty:
             pass
-        if self.winfo_exists():
+        if self._alive():
             self.after(100, self._poll_ui_queue)
 
     def _load_settings(self) -> dict:
@@ -876,7 +891,7 @@ class SimLauncherApp(ctk.CTk):
                 try:
                     self.save_data()
                 finally:
-                    if self.winfo_exists():
+                    if self._alive():
                         self._autosave_after_id = self.after(interval, autosave)
             self._autosave_after_id = self.after(interval, autosave)
 
@@ -886,6 +901,10 @@ class SimLauncherApp(ctk.CTk):
 
     def show_error_popup(self, exc, val, tb):
         log_error("Fatal", val)
+        # During shutdown, stray callbacks hitting the destroyed window are
+        # expected — log them but don't pop a dialog
+        if self._closing or (isinstance(val, tk.TclError) and "destroyed" in str(val)):
+            return
         messagebox.showerror("Error", f"An error occurred:\n{str(val)}\n\nCheck {LOG_FILE} for details.")
 
     def show_toast(self, message: str, color: str = "#333333", duration: int = 3000):
@@ -893,7 +912,7 @@ class SimLauncherApp(ctk.CTk):
             self.toast_lbl.configure(text=message, fg_color=color)
             self.toast_lbl.place(relx=0.5, rely=0.95, anchor="center")
             self.toast_lbl.lift()
-            self.after(duration, lambda: (self.toast_lbl.place_forget() if self.winfo_exists() else None))
+            self.after(duration, lambda: (self.toast_lbl.place_forget() if self._alive() else None))
         except Exception:
             pass
 
@@ -914,6 +933,7 @@ class SimLauncherApp(ctk.CTk):
         ctk.CTkButton(self.profile_frame, text="+", width=35, fg_color="#27AE60", command=self.add_profile).pack(side="left", padx=2)
         ctk.CTkButton(self.profile_frame, text="−", width=35, fg_color="#E74C3C", command=self.delete_profile).pack(side="left", padx=2)
         ctk.CTkButton(self.profile_frame, text="⚙", width=35, fg_color="#34495E", command=self.open_settings).pack(side="left", padx=2)
+        ctk.CTkButton(self.profile_frame, text="⏻", width=35, fg_color="transparent", hover_color="#C0392B", border_width=1, command=self.exit_app).pack(side="left", padx=(8, 2))
         self.actions = ctk.CTkFrame(self, fg_color="transparent")
         self.actions.pack(fill="x", padx=20, pady=12)
         ctk.CTkButton(self.actions, text="➕ Add App", command=self.add_app, fg_color="#34495E", width=120).pack(side="left", padx=5)
@@ -1153,7 +1173,7 @@ class SimLauncherApp(ctk.CTk):
                 self.crash_detector.check_crashes(self.on_app_crashed)
             except Exception as e:
                 log_error("monitor_processes.crash_check", e)
-        if self.winfo_exists():
+        if self._alive():
             self.after(delay, self.monitor_processes)
 
     def on_app_crashed(self, crashed_apps: list):
@@ -1198,15 +1218,23 @@ class SimLauncherApp(ctk.CTk):
             self.monitor_processes_once()
         self.ui_call(do_restore)
 
-    def quit_app(self, i=None, item=None):
-        # Runs on the pystray thread — Tk work must go through ui_call
+    def exit_app(self):
+        """Shut down cleanly. Must run on the main thread."""
+        if self._closing:
+            return
+        self.save_data()
+        self._closing = True
         self.hotkey_manager.unregister_all()
         try:
             if getattr(self, 'tray_icon', None):
                 self.tray_icon.stop()
         except Exception:
             pass
-        self.ui_call(self.destroy)
+        self.destroy()
+
+    def quit_app(self, i=None, item=None):
+        # Runs on the pystray thread — Tk work must go through ui_call
+        self.ui_call(self.exit_app)
 
     def refresh_list_ui(self):
         for w in self.scroll.winfo_children():

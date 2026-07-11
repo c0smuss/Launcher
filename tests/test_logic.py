@@ -117,6 +117,33 @@ def test_icon_cache_returns_same_object_for_missing_path():
     assert a is b
 
 
+# --- IPC message parsing ---
+
+def test_parse_ipc_show():
+    assert ld.parse_ipc_message('{"action": "show"}') == {"action": "show"}
+
+
+def test_parse_ipc_launch_with_profile():
+    msg = ld.parse_ipc_message('{"action": "launch", "profile": "iRacing"}')
+    assert msg["action"] == "launch"
+    assert msg["profile"] == "iRacing"
+
+
+def test_parse_ipc_rejects_unknown_action():
+    assert ld.parse_ipc_message('{"action": "delete_everything"}') is None
+
+
+def test_parse_ipc_rejects_garbage():
+    assert ld.parse_ipc_message("not json at all") is None
+    assert ld.parse_ipc_message("") is None
+    assert ld.parse_ipc_message("[1,2,3]") is None
+
+
+def test_parse_ipc_rejects_oversized():
+    huge = '{"action": "show", "pad": "' + "x" * 5000 + '"}'
+    assert ld.parse_ipc_message(huge) is None
+
+
 # --- validate_app_data ---
 
 def test_validate_app_data_accepts_complete_record():

@@ -4,6 +4,7 @@ from tkinter import filedialog, messagebox, simpledialog
 import os
 import subprocess
 import json
+import socket
 import threading
 import time
 import psutil
@@ -55,6 +56,58 @@ DEFAULT_SETTINGS = {
         "minimize": "<Control-m>"
     }
 }
+
+# --- SINGLE-INSTANCE IPC ---
+# A bound localhost socket doubles as the instance lock and command channel.
+IPC_HOST = "127.0.0.1"
+IPC_PORT = 48653
+IPC_BANNER_APP = "slaunch"
+_IPC_MAX_BYTES = 4096
+_IPC_ACTIONS = ("show", "launch")
+
+def parse_ipc_message(line: str) -> Optional[dict]:
+    """Parse one line of IPC command JSON. Returns a dict whose 'action' is
+    whitelisted, or None for anything malformed / oversized / unknown."""
+    if not line or len(line) > _IPC_MAX_BYTES:
+        return None
+    try:
+        msg = json.loads(line)
+    except Exception:
+        return None
+    if not isinstance(msg, dict) or msg.get("action") not in _IPC_ACTIONS:
+        return None
+    return msg
+
+def acquire_single_instance():
+    """Bind the IPC port. Returns the listening socket if we're the primary,
+    else None (another instance — or a stranger — owns it). The bind failure
+    IS the lock, so SO_REUSEADDR is deliberately not set."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind((IPC_HOST, IPC_PORT))
+        s.listen(1)
+        return s
+    except OSError:
+        s.close()
+        return None
+
+def forward_to_primary(message: dict) -> bool:
+    """Send a command to the running primary. Returns True only after a
+    verified handshake, False if the port owner isn't us (foreign program)."""
+    try:
+        with socket.create_connection((IPC_HOST, IPC_PORT), timeout=2) as c:
+            c.settimeout(2)
+            banner_line = c.recv(_IPC_MAX_BYTES).decode("utf-8", "replace").split("\n", 1)[0]
+            try:
+                banner = json.loads(banner_line)
+            except Exception:
+                return False
+            if not isinstance(banner, dict) or banner.get("app") != IPC_BANNER_APP:
+                return False
+            c.sendall((json.dumps(message) + "\n").encode())
+            return True
+    except Exception:
+        return False
 
 # CPU Priority Map
 PRIORITY_MAP = {
@@ -847,9 +900,11 @@ class EnhancedDraggableRow(DraggableRow):
 
 # --- MAIN APP ---
 class SimLauncherApp(ctk.CTk):
-    def __init__(self):
+    def __init__(self, ipc_socket=None):
         super().__init__()
         self._closing = False
+        self._seq_running = False
+        self._ipc_socket = ipc_socket
         self.report_callback_exception = self.show_error_popup
         self.title(f"{APP_NAME} v{VERSION}")
         try:
@@ -882,6 +937,8 @@ class SimLauncherApp(ctk.CTk):
         self.monitor_processes()
         self.setup_autosave()
         self.setup_hotkeys()
+        if self._ipc_socket is not None:
+            threading.Thread(target=self._ipc_accept_loop, daemon=True).start()
         logging.info(f"App start v{VERSION}")
 
     def _alive(self) -> bool:
@@ -912,6 +969,54 @@ class SimLauncherApp(ctk.CTk):
             pass
         if self._alive():
             self.after(100, self._poll_ui_queue)
+
+    def _ipc_accept_loop(self):
+        """Primary-instance listener. Blocking accept() → zero idle CPU.
+        Exits when exit_app() closes the socket (accept raises OSError)."""
+        while not self._closing:
+            try:
+                conn, _ = self._ipc_socket.accept()
+            except OSError:
+                break
+            try:
+                conn.settimeout(2)
+                conn.sendall((json.dumps({"app": IPC_BANNER_APP, "version": VERSION}) + "\n").encode())
+                line = conn.recv(_IPC_MAX_BYTES).decode("utf-8", "replace").split("\n", 1)[0]
+                msg = parse_ipc_message(line)
+                if msg and not self._closing:
+                    self.ui_call(self._handle_ipc, msg)
+            except Exception as e:
+                log_error("ipc_accept", e)
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+
+    def _handle_ipc(self, msg: dict):
+        """Dispatch a forwarded command on the main thread."""
+        action = msg.get("action")
+        if action == "show":
+            self._do_restore()
+        elif action == "launch":
+            profile = msg.get("profile")
+            if profile:
+                match = self._match_profile(profile)
+                if not match:
+                    self.show_toast(f"Profile '{profile}' not found", "#E67E22")
+                    return
+                self.change_profile(match)
+            self.launch_sequence()
+
+    def _match_profile(self, name: str) -> Optional[str]:
+        """Case-insensitive profile-name match; returns the actual key or None."""
+        if not name:
+            return None
+        low = name.lower()
+        for key in self.data["profiles"]:
+            if key.lower() == low:
+                return key
+        return None
 
     def _load_settings(self) -> dict:
         if os.path.exists(SETTINGS_FILE):
@@ -1058,6 +1163,9 @@ class SimLauncherApp(ctk.CTk):
 
     def change_profile(self, new_p: str):
         self.data["current_profile"] = new_p
+        # Keep the combo in sync when switched programmatically (IPC/CLI)
+        if hasattr(self, 'profile_var'):
+            self.profile_var.set(new_p)
         self.save_data()
         self.refresh_list_ui()
 
@@ -1178,11 +1286,17 @@ class SimLauncherApp(ctk.CTk):
         self.after(500, self.monitor_processes_once)
 
     def launch_sequence(self):
+        # INV-1: button, hotkey, tray menu, IPC, and --launch all reach here;
+        # the disabled button no longer guards re-entry, so gate on a flag.
+        if self._seq_running:
+            self.show_toast("Sequence already running", "#E67E22")
+            return
         apps = self.get_current_apps()
         enabled_apps = [a for a in apps if a.get('enabled', True)]
         if not enabled_apps:
             self.show_toast("No enabled apps", "#E67E22")
             return
+        self._seq_running = True
         if self.settings.get('minimize_on_launch'):
             self.withdraw()
         self.btn_launch_seq.configure(state="disabled")
@@ -1190,40 +1304,45 @@ class SimLauncherApp(ctk.CTk):
         def run_seq():
             launched = 0
             logging.info(f"Launch sequence start: {len(enabled_apps)} enabled apps")
-            for app in enabled_apps:
-                if is_app_running(app.get('path'))[0]:
-                    self.ui_call(self.show_toast, f"{app['name']} already running, skipping", "#E67E22")
-                    continue
-                if not os.path.exists(app['path']):
-                    self.ui_call(self.show_toast, f"{app['name']} not found", "#C0392B")
-                    continue
-                try:
-                    self.app_stats.record_launch(app['name'])
-                    self.ui_call(self.show_toast, f"Starting {app['name']}...", "#2980B9")
-                    proc = launch_executable(app)
-                    if proc:
-                        try:
-                            apply_performance_settings(psutil.Process(proc.pid), app)
-                            if self.settings.get('crash_detection'):
-                                self.crash_detector.register_app(app.get('path'), proc.pid, name=app.get('name'),
-                                                                 popen=proc, auto_restart=app.get('auto_restart', False))
-                        except Exception:
-                            pass
-                    else:
-                        self.ui_call(apply_settings_after_admin_launch, self, app.get('path'), app, 2000)
-                    launched += 1
-                    app['last_run'] = datetime.now().isoformat()
-                except Exception as e:
-                    log_error(f"Seq {app['name']}", e)
-                delay = app.get('delay', 0)
-                time.sleep(delay if delay > 0 else 1.5)
-            logging.info(f"Launch sequence complete: launched {launched} apps")
-            def finish():
-                self.save_data()
-                self.show_toast(f"Sequence complete! Launched {launched} apps", "#27AE60")
-                self.btn_launch_seq.configure(state="normal")
-                self.after(500, self.monitor_processes_once)
-            self.ui_call(finish)
+            try:
+                for app in enabled_apps:
+                    if is_app_running(app.get('path'))[0]:
+                        self.ui_call(self.show_toast, f"{app['name']} already running, skipping", "#E67E22")
+                        continue
+                    if not os.path.exists(app['path']):
+                        self.ui_call(self.show_toast, f"{app['name']} not found", "#C0392B")
+                        continue
+                    try:
+                        self.app_stats.record_launch(app['name'])
+                        self.ui_call(self.show_toast, f"Starting {app['name']}...", "#2980B9")
+                        proc = launch_executable(app)
+                        if proc:
+                            try:
+                                apply_performance_settings(psutil.Process(proc.pid), app)
+                                if self.settings.get('crash_detection'):
+                                    self.crash_detector.register_app(app.get('path'), proc.pid, name=app.get('name'),
+                                                                     popen=proc, auto_restart=app.get('auto_restart', False))
+                            except Exception:
+                                pass
+                        else:
+                            self.ui_call(apply_settings_after_admin_launch, self, app.get('path'), app, 2000)
+                        launched += 1
+                        app['last_run'] = datetime.now().isoformat()
+                    except Exception as e:
+                        log_error(f"Seq {app['name']}", e)
+                    delay = app.get('delay', 0)
+                    time.sleep(delay if delay > 0 else 1.5)
+            finally:
+                # INV-1: always clear the guard and re-enable the button, even
+                # if the loop raised, so the launcher can never wedge.
+                self._seq_running = False
+                logging.info(f"Launch sequence complete: launched {launched} apps")
+                def finish():
+                    self.save_data()
+                    self.show_toast(f"Sequence complete! Launched {launched} apps", "#27AE60")
+                    self.btn_launch_seq.configure(state="normal")
+                    self.after(500, self.monitor_processes_once)
+                self.ui_call(finish)
         threading.Thread(target=run_seq, daemon=True).start()
 
     def kill_one(self, exe_path: str):
@@ -1286,18 +1405,21 @@ class SimLauncherApp(ctk.CTk):
         except Exception as e:
             log_error("run_tray", e)
 
-    def restore(self, i=None, item=None):
-        # Runs on the pystray thread — Tk work must go through ui_call
+    def _do_restore(self):
+        """Bring the window back from the tray. Main thread only — pystray's
+        stop() posts a message to the tray thread, so it's safe cross-thread."""
         try:
             if getattr(self, 'tray_icon', None):
                 self.tray_icon.stop()
         except Exception:
             pass
-        def do_restore():
-            self.deiconify()
-            self.is_minimized_to_tray = False
-            self.monitor_processes_once()
-        self.ui_call(do_restore)
+        self.deiconify()
+        self.is_minimized_to_tray = False
+        self.monitor_processes_once()
+
+    def restore(self, i=None, item=None):
+        # Runs on the pystray thread — Tk work must go through ui_call
+        self.ui_call(self._do_restore)
 
     def exit_app(self):
         """Shut down cleanly. Must run on the main thread."""
@@ -1310,6 +1432,12 @@ class SimLauncherApp(ctk.CTk):
         try:
             if getattr(self, 'tray_icon', None):
                 self.tray_icon.stop()
+        except Exception:
+            pass
+        # Close the IPC socket so the accept loop unblocks and the thread dies
+        try:
+            if getattr(self, '_ipc_socket', None):
+                self._ipc_socket.close()
         except Exception:
             pass
         self.destroy()
@@ -1366,7 +1494,24 @@ def validate_app_data(app):
     return all(k in app for k in required)
 
 if __name__ == "__main__":
-    app = SimLauncherApp()
+    ipc_socket = acquire_single_instance()
+    if ipc_socket is None:
+        # Port already bound — forward our intent to the running instance.
+        if forward_to_primary({"action": "show"}):
+            sys.exit(0)
+        # The port is held by something that isn't us: fail closed with a
+        # clear message rather than run a second GUI fighting over the config.
+        try:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror(APP_NAME,
+                f"Port {IPC_PORT} is already in use by another program, so /Launch can't start.\n\n"
+                f"Close the conflicting program (or change IPC_PORT) and try again.")
+            root.destroy()
+        except Exception:
+            pass
+        sys.exit(1)
+    app = SimLauncherApp(ipc_socket=ipc_socket)
     app.mainloop()
 
 

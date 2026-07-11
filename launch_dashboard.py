@@ -1001,6 +1001,90 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkButton(btn_frame, text="Save", command=save_settings, fg_color="#27AE60", width=150).pack(side="left", padx=5)
         ctk.CTkButton(btn_frame, text="Cancel", command=self.destroy, fg_color="#C0392B", width=150).pack(side="right", padx=5)
 
+# --- STATS VIEW ---
+def fmt_duration(seconds) -> str:
+    """Humanize a duration: '5h 32m' / '47m' / '12s'."""
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "0s"
+    if s < 0:
+        s = 0
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}h {m}m"
+    if m:
+        return f"{m}m"
+    return f"{sec}s"
+
+def fmt_iso_datetime(iso: str) -> str:
+    if not iso:
+        return "Never"
+    try:
+        return datetime.fromisoformat(iso).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return iso
+
+class StatsDialog(ctk.CTkToplevel):
+    def __init__(self, parent, app_stats, on_reset):
+        super().__init__(parent)
+        self.title("Statistics")
+        self.geometry("700x600")
+        self.transient(parent)
+        self.grab_set()
+        self.on_reset = on_reset
+        stats = app_stats.stats
+
+        total_launches = sum(s.get('total_launches', 0) for s in stats.values())
+        total_runtime = sum(s.get('total_runtime_seconds', 0) for s in stats.values())
+        most = max(stats.items(), key=lambda kv: kv[1].get('total_launches', 0), default=(None, None))
+        most_name = most[0] or "—"
+        firsts = [s.get('first_launched') for s in stats.values() if s.get('first_launched')]
+        since = fmt_iso_datetime(min(firsts)) if firsts else "—"
+
+        summary = ctk.CTkFrame(self)
+        summary.pack(fill="x", padx=20, pady=(20, 10))
+        summary_text = (f"Total launches: {total_launches}     "
+                        f"Total tracked time: {fmt_duration(total_runtime)}\n"
+                        f"Most launched: {most_name}     Tracking since: {since}")
+        ctk.CTkLabel(summary, text=summary_text, font=("Roboto", 12), anchor="w",
+                     justify="left", wraplength=640).pack(fill="x", padx=12, pady=10)
+
+        table = ctk.CTkScrollableFrame(self, label_text="Per-app")
+        table.pack(fill="both", expand=True, padx=20, pady=10)
+        headers = ["App", "Launches", "Total time", "Avg session", "Crashes", "Last launched"]
+        for c, h in enumerate(headers):
+            table.grid_columnconfigure(c, weight=1 if c == 0 else 0)
+            ctk.CTkLabel(table, text=h, font=("Roboto", 11, "bold"), anchor="w").grid(row=0, column=c, sticky="w", padx=5, pady=4)
+        rows = sorted(stats.items(), key=lambda kv: kv[1].get('total_launches', 0), reverse=True)
+        for r, (name, s) in enumerate(rows, start=1):
+            bg = ("gray85", "#2B2B2B") if r % 2 == 0 else "transparent"
+            cells = [
+                name,
+                str(s.get('total_launches', 0)),
+                fmt_duration(s.get('total_runtime_seconds', 0)),
+                fmt_duration(s.get('avg_runtime', 0)),
+                str(s.get('crashes', 0)),
+                fmt_iso_datetime(s.get('last_launched')),
+            ]
+            for c, val in enumerate(cells):
+                ctk.CTkLabel(table, text=val, font=("Roboto", 10), anchor="w",
+                             fg_color=bg, corner_radius=0).grid(row=r, column=c, sticky="ew", padx=5, pady=1)
+        if not rows:
+            ctk.CTkLabel(table, text="No statistics yet.", text_color="gray").grid(row=1, column=0, columnspan=6, pady=20)
+
+        footer = ctk.CTkFrame(self, fg_color="transparent")
+        footer.pack(fill="x", padx=20, pady=(0, 15))
+        ctk.CTkButton(footer, text="Reset Statistics", fg_color="#C0392B", hover_color="#E74C3C",
+                      command=self._reset).pack(side="left")
+        ctk.CTkButton(footer, text="Close", command=self.destroy).pack(side="right")
+
+    def _reset(self):
+        if messagebox.askyesno("Confirm", "Reset all statistics? This cannot be undone."):
+            self.on_reset()
+            self.destroy()
+
 # --- ENHANCED ROW WITH STATS ---
 class EnhancedDraggableRow(DraggableRow):
     def __init__(self, parent, app_data, actions, index, stats: AppStatistics = None, **kwargs):
@@ -1284,8 +1368,16 @@ class SimLauncherApp(ctk.CTk):
         self.btn_race_mode = ctk.CTkButton(self.actions, text="🏁 RACE MODE", fg_color="transparent", border_width=1,
                                            hover_color="#C0392B", width=130, command=self.toggle_race_mode)
         self.btn_race_mode.pack(side="right", padx=5)
+        ctk.CTkButton(self.actions, text="📊", width=40, fg_color="#34495E", command=self.open_stats).pack(side="right", padx=5)
         self.scroll = ctk.CTkScrollableFrame(self, label_text="Apps")
         self.scroll.pack(fill="both", expand=True, padx=20, pady=10)
+
+    def open_stats(self):
+        def do_reset():
+            self.app_stats.stats.clear()
+            self.app_stats._save_stats()
+            self.show_toast("Statistics reset", "#C0392B")
+        StatsDialog(self, self.app_stats, do_reset)
 
     def open_settings(self):
         def save_settings(new_settings):

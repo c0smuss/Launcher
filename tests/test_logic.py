@@ -117,6 +117,22 @@ def test_icon_cache_returns_same_object_for_missing_path():
     assert a is b
 
 
+# --- duration formatting ---
+
+def test_fmt_duration_boundaries():
+    assert ld.fmt_duration(0) == "0s"
+    assert ld.fmt_duration(59) == "59s"
+    assert ld.fmt_duration(60) == "1m"
+    assert ld.fmt_duration(3599) == "59m"
+    assert ld.fmt_duration(3600) == "1h 0m"
+    assert ld.fmt_duration(19920) == "5h 32m"
+
+
+def test_fmt_duration_handles_bad_input():
+    assert ld.fmt_duration(None) == "0s"
+    assert ld.fmt_duration(-5) == "0s"
+
+
 # --- profile import validation ---
 
 def test_import_good_profile_fills_defaults():

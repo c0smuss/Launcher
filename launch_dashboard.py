@@ -90,8 +90,23 @@ try:
 except ImportError:
     HAS_WIN32 = False
 
+# Extracted exe icons are cached for the session so refresh_list_ui (which runs
+# on every drag/edit) doesn't re-hit the Win32 icon APIs each time. Keyed by
+# (normalized path or "" for missing/no-path, size); icons don't change while an
+# exe exists, so no invalidation is needed.
+_icon_cache = {}
+
 def get_icon_from_exe(path, size=32):
-    if not HAS_WIN32 or not os.path.exists(path):
+    key = (os.path.normpath(path).lower() if path and os.path.exists(path) else "", size)
+    cached = _icon_cache.get(key)
+    if cached is not None:
+        return cached
+    img = _extract_icon_image(path, size)
+    _icon_cache[key] = img
+    return img
+
+def _extract_icon_image(path, size=32):
+    if not HAS_WIN32 or not path or not os.path.exists(path):
         return get_placeholder_icon(size)
     try:
         large, small = win32gui.ExtractIconEx(path, 0)

@@ -82,6 +82,15 @@ def test_app_statistics_unknown_returns_empty(isolated_files):
     assert stats.get_stats("Nonexistent") == {}
 
 
+# --- icon cache ---
+
+def test_icon_cache_returns_same_object_for_missing_path():
+    ld._icon_cache.clear()
+    a = ld.get_icon_from_exe(r"C:\fake\does-not-exist.exe")
+    b = ld.get_icon_from_exe(r"C:\fake\does-not-exist.exe")
+    assert a is b
+
+
 # --- validate_app_data ---
 
 def test_validate_app_data_accepts_complete_record():

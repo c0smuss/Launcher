@@ -50,6 +50,7 @@ DEFAULT_SETTINGS = {
     "theme": "Dark",
     "auto_save_interval": 5000,
     "monitor_interval": 2000,
+    "sequence_gap": 0.75,
     "startup_apps": [],
     "minimize_on_launch": False,
     "launcher_eco_mode": True,
@@ -982,6 +983,10 @@ class SettingsDialog(ctk.CTkToplevel):
         entry_monitor = ctk.CTkEntry(scroll)
         entry_monitor.insert(0, str(settings.get('monitor_interval', 2000)))
         entry_monitor.pack(fill="x", pady=5)
+        ctk.CTkLabel(scroll, text="Gap between sequence launches (seconds):", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
+        entry_gap = ctk.CTkEntry(scroll)
+        entry_gap.insert(0, str(settings.get('sequence_gap', 0.75)))
+        entry_gap.pack(fill="x", pady=5)
         ctk.CTkLabel(scroll, text="Reliability:", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
         var_crash = ctk.BooleanVar(value=settings.get('crash_detection', True))
         ctk.CTkCheckBox(scroll, text="Enable crash detection & recovery", variable=var_crash).pack(anchor="w", pady=5)
@@ -1056,6 +1061,10 @@ class SettingsDialog(ctk.CTkToplevel):
                 settings['monitor_interval'] = int(entry_monitor.get() or 2000)
             except ValueError:
                 settings['monitor_interval'] = 2000
+            try:
+                settings['sequence_gap'] = max(0.0, float(entry_gap.get() or 0.75))
+            except ValueError:
+                settings['sequence_gap'] = 0.75
             settings['crash_detection'] = var_crash.get()
             settings['auto_save_interval'] = 5000 if var_autosave.get() else 0
             settings['minimize_on_launch'] = var_minimize.get()
@@ -1849,8 +1858,11 @@ class SimLauncherApp(ctk.CTk):
                         app['last_run'] = datetime.now().isoformat()
                     except Exception as e:
                         log_error(f"Seq {app['name']}", e)
-                    delay = app.get('delay', 0)
-                    time.sleep(delay if delay > 0 else 1.5)
+                    # Per-app delay means "wait before starting the NEXT app",
+                    # so nothing to wait for after the last one.
+                    if app is not enabled_apps[-1]:
+                        delay = app.get('delay', 0)
+                        time.sleep(delay if delay > 0 else self.settings.get('sequence_gap', 0.75))
             finally:
                 # INV-1: always clear the guard and re-enable the button, even
                 # if the loop raised, so the launcher can never wedge.

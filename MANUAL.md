@@ -57,6 +57,7 @@ App Settings (per app)
 
 Launch Sequence
 - "🚀 LAUNCH SEQUENCE" launches enabled apps in profile order, respecting per-app delays.
+- Apps with delay 0 are spaced by the configurable sequence gap (Settings, default 0.75s); there is no wait after the last app.
 - If "Minimize on launch" is enabled in Settings, the app will minimize to tray during a sequence.
 - Sequence will skip apps already running.
 
@@ -104,6 +105,7 @@ Settings
 Accessible from the header ⚙:
 - Theme: Light, Dark, System. Applies live (no restart needed).
 - Monitor Interval: How often the app checks process states (ms).
+- Gap between sequence launches: Seconds between apps with no per-app delay set (default 0.75).
 - Crash detection: Enable or disable crash monitoring.
 - Auto-save interval: Periodic saving of config (ms).
 - Minimize on launch: Minimize app during launch sequences.

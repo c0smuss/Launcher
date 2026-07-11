@@ -1201,6 +1201,7 @@ class SimLauncherApp(ctk.CTk):
         self._seq_running = False
         self._ipc_socket = ipc_socket
         self._last_saved_payload = None
+        self._profile_menu = None
         self.race_mode = False
         self._boosted_pids = []
         self._race_boost_pending = False
@@ -1631,7 +1632,15 @@ class SimLauncherApp(ctk.CTk):
         return tk.Menu(self, tearoff=0, font=font, bd=0, activeborderwidth=0, **colors)
 
     def _show_profile_menu(self):
+        # Destroy the previous instance: tk.Menu widgets are children of the
+        # root and would otherwise accumulate for the session, one per click
+        if self._profile_menu is not None:
+            try:
+                self._profile_menu.destroy()
+            except Exception:
+                pass
         menu = self._themed_menu()
+        self._profile_menu = menu
         menu.add_command(label="New Profile…", command=self.add_profile)
         menu.add_command(label="Rename Profile…", command=self.rename_profile)
         menu.add_command(label="Duplicate Profile", command=self.duplicate_profile)

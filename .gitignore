@@ -1,6 +1,7 @@
 # Python
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # User data (machine-specific, may contain personal paths/profiles)
 launch_config.json

@@ -1,5 +1,6 @@
-customtkinter 
+customtkinter
 pillow
 pywin32
 psutil
 pystray
+keyboard

@@ -51,12 +51,27 @@ DEFAULT_SETTINGS = {
     "launcher_eco_mode": True,
     "check_updates": True,
     "crash_detection": True,
+    "global_hotkeys": True,
     "keyboard_shortcuts": {
-        "launch_seq": "<Control-l>",
-        "kill_all": "<Control-k>",
-        "minimize": "<Control-m>"
-    }
+        "launch_seq": "ctrl+alt+l",
+        "kill_all": "ctrl+alt+k",
+        "race_mode": "ctrl+alt+r",
+        "toggle_window": "ctrl+alt+space",
+    },
 }
+
+def migrate_hotkey_settings(settings: dict) -> dict:
+    """Bring keyboard_shortcuts up to the current key set: replace legacy
+    Tk-style values ('<Control-l>') with the keyboard-library defaults, drop
+    obsolete keys, and keep any user-set modern combos. Mutates and returns."""
+    defaults = DEFAULT_SETTINGS["keyboard_shortcuts"]
+    old = settings.get("keyboard_shortcuts") or {}
+    new = {}
+    for key, default in defaults.items():
+        val = old.get(key)
+        new[key] = default if (not val or (isinstance(val, str) and val.startswith("<"))) else val
+    settings["keyboard_shortcuts"] = new
+    return settings
 
 # --- SINGLE-INSTANCE IPC ---
 # A bound localhost socket doubles as the instance lock and command channel.
@@ -830,8 +845,8 @@ class HotkeyManager:
             keyboard.add_hotkey(hotkey_str, callback)
             self.hotkeys[hotkey_str] = callback
             return True
-        except ImportError:
-            log_error("HotkeyManager", "keyboard module not installed")
+        except Exception as e:
+            log_error("HotkeyManager.register", e)
             return False
     def unregister_all(self):
         try:
@@ -872,9 +887,41 @@ class SettingsDialog(ctk.CTkToplevel):
         var_launcher_eco = ctk.BooleanVar(value=settings.get('launcher_eco_mode', True))
         ctk.CTkCheckBox(scroll, text="Run launcher in Efficiency Mode (EcoQoS) — leaves more CPU for the sim",
                         variable=var_launcher_eco).pack(anchor="w", pady=5)
+
+        ctk.CTkLabel(scroll, text="Hotkeys (global):", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
+        var_hotkeys = ctk.BooleanVar(value=settings.get('global_hotkeys', True))
+        ctk.CTkCheckBox(scroll, text="Enable global hotkeys", variable=var_hotkeys).pack(anchor="w", pady=5)
+        ks = settings.get('keyboard_shortcuts', {})
+        hotkey_labels = {
+            'launch_seq': 'Launch sequence',
+            'kill_all': 'Kill all',
+            'race_mode': 'Race mode',
+            'toggle_window': 'Show / hide window',
+        }
+        hotkey_entries = {}
+        for key, label in hotkey_labels.items():
+            row = ctk.CTkFrame(scroll, fg_color="transparent")
+            row.pack(fill="x", pady=2)
+            ctk.CTkLabel(row, text=label, width=140, anchor="w").pack(side="left")
+            e = ctk.CTkEntry(row)
+            e.insert(0, ks.get(key, ''))
+            e.pack(side="left", fill="x", expand=True)
+            hotkey_entries[key] = e
+
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(pady=15, fill="x", padx=20)
         def save_settings():
+            new_hotkeys = {k: e.get().strip() for k, e in hotkey_entries.items()}
+            try:
+                import keyboard
+                for combo in new_hotkeys.values():
+                    if combo:
+                        keyboard.parse_hotkey(combo)  # raises on invalid combo
+            except ImportError:
+                pass  # can't validate without the module; accept as entered
+            except Exception:
+                messagebox.showerror("Error", "One or more hotkeys are invalid.\nUse a format like 'ctrl+alt+l'.")
+                return
             settings['theme'] = theme_var.get()
             try:
                 settings['monitor_interval'] = int(entry_monitor.get() or 2000)
@@ -884,6 +931,8 @@ class SettingsDialog(ctk.CTkToplevel):
             settings['auto_save_interval'] = 5000 if var_autosave.get() else 0
             settings['minimize_on_launch'] = var_minimize.get()
             settings['launcher_eco_mode'] = var_launcher_eco.get()
+            settings['global_hotkeys'] = var_hotkeys.get()
+            settings['keyboard_shortcuts'] = new_hotkeys
             self.callback(settings)
             self.destroy()
         ctk.CTkButton(btn_frame, text="Save", command=save_settings, fg_color="#27AE60", width=150).pack(side="left", padx=5)
@@ -1042,14 +1091,15 @@ class SimLauncherApp(ctk.CTk):
         return None
 
     def _load_settings(self) -> dict:
+        settings = DEFAULT_SETTINGS.copy()
         if os.path.exists(SETTINGS_FILE):
             try:
                 with open(SETTINGS_FILE, 'r') as f:
                     loaded = json.load(f)
-                    return {**DEFAULT_SETTINGS, **loaded}
+                    settings = {**DEFAULT_SETTINGS, **loaded}
             except Exception:
                 log_error("_load_settings", "Failed to read settings")
-        return DEFAULT_SETTINGS.copy()
+        return migrate_hotkey_settings(settings)
 
     def _save_settings(self):
         try:
@@ -1077,8 +1127,40 @@ class SimLauncherApp(ctk.CTk):
             self._autosave_after_id = self.after(interval, autosave)
 
     def setup_hotkeys(self):
+        """(Re)register global hotkeys. keyboard invokes callbacks on its own
+        thread, so every callback routes through ui_call (INV-8)."""
+        if not self.settings.get('global_hotkeys', True):
+            return
+        try:
+            import keyboard  # noqa: F401
+        except ImportError:
+            self.show_toast("Install 'keyboard' package for global hotkeys", "#E67E22")
+            return
         keys = self.settings.get('keyboard_shortcuts', {})
-        # optional: register hotkeys if keyboard module available
+        bindings = {
+            'launch_seq': lambda: self.ui_call(self.launch_sequence),
+            'kill_all': lambda: self.ui_call(self._hotkey_kill_all),
+            'toggle_window': lambda: self.ui_call(self._hotkey_toggle_window),
+        }
+        # race_mode gains a handler in a later commit; register it once it exists
+        if hasattr(self, 'toggle_race_mode'):
+            bindings['race_mode'] = lambda: self.ui_call(self.toggle_race_mode)
+        for action, cb in bindings.items():
+            combo = keys.get(action)
+            if combo:
+                self.hotkey_manager.register(combo, cb)
+
+    def _hotkey_kill_all(self):
+        # INV-2: restore the window first so the confirm dialog is visible
+        if getattr(self, 'is_minimized_to_tray', False):
+            self._do_restore()
+        self.kill_all()
+
+    def _hotkey_toggle_window(self):
+        if getattr(self, 'is_minimized_to_tray', False):
+            self._do_restore()
+        else:
+            self.minimize_to_tray()
 
     def show_error_popup(self, exc, val, tb):
         log_error("Fatal", val)
@@ -1143,6 +1225,8 @@ class SimLauncherApp(ctk.CTk):
             self.setup_autosave()
             ctk.set_appearance_mode(self.settings.get('theme', 'Dark'))
             set_eco_qos(enable=self.settings.get('launcher_eco_mode', True))
+            self.hotkey_manager.unregister_all()
+            self.setup_hotkeys()
             self.show_toast("Settings saved", "#27AE60")
         SettingsDialog(self, self.settings, save_settings)
 

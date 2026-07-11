@@ -117,6 +117,33 @@ def test_icon_cache_returns_same_object_for_missing_path():
     assert a is b
 
 
+# --- hotkey settings migration ---
+
+def test_migrate_replaces_legacy_tk_hotkeys():
+    settings = {"keyboard_shortcuts": {"launch_seq": "<Control-l>", "kill_all": "<Control-k>", "minimize": "<Control-m>"}}
+    ld.migrate_hotkey_settings(settings)
+    ks = settings["keyboard_shortcuts"]
+    assert ks["launch_seq"] == "ctrl+alt+l"
+    assert ks["kill_all"] == "ctrl+alt+k"
+    assert "minimize" not in ks           # obsolete key dropped
+    assert "race_mode" in ks and "toggle_window" in ks  # new keys present
+
+
+def test_migrate_keeps_modern_user_combos():
+    settings = {"keyboard_shortcuts": {"launch_seq": "f9", "kill_all": "f10"}}
+    ld.migrate_hotkey_settings(settings)
+    ks = settings["keyboard_shortcuts"]
+    assert ks["launch_seq"] == "f9"
+    assert ks["kill_all"] == "f10"
+    assert ks["race_mode"] == "ctrl+alt+r"  # filled from default
+
+
+def test_migrate_empty_settings_uses_defaults():
+    settings = {}
+    ld.migrate_hotkey_settings(settings)
+    assert settings["keyboard_shortcuts"] == ld.DEFAULT_SETTINGS["keyboard_shortcuts"]
+
+
 # --- IPC message parsing ---
 
 def test_parse_ipc_show():

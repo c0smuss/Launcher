@@ -77,6 +77,38 @@ def test_crash_detector_alive_popen_stays_watched_without_scan(isolated_files, m
     assert r"C:\fake\alive.exe" in cd.watch_list
 
 
+# --- admin-launch crash registration hook ---
+
+class _ImmediateParent:
+    """Fake Tk parent whose after() runs callbacks synchronously."""
+    def after(self, ms, cb=None):
+        if cb:
+            cb()
+    def winfo_exists(self):
+        return True
+
+
+class _FakeProc:
+    pid = 123
+
+
+def test_admin_launch_on_found_fires_when_running(monkeypatch):
+    monkeypatch.setattr(ld, "is_app_running", lambda p: (True, _FakeProc()))
+    monkeypatch.setattr(ld, "apply_performance_settings", lambda proc, d: True)
+    found = []
+    ld.apply_settings_after_admin_launch(_ImmediateParent(), r"C:\x.exe", {},
+                                         on_found=lambda proc: found.append(proc.pid))
+    assert found == [123]
+
+
+def test_admin_launch_on_found_not_fired_when_never_running(monkeypatch):
+    monkeypatch.setattr(ld, "is_app_running", lambda p: (False, None))
+    found = []
+    ld.apply_settings_after_admin_launch(_ImmediateParent(), r"C:\x.exe", {},
+                                         max_retries=3, on_found=lambda proc: found.append(proc.pid))
+    assert found == []
+
+
 # --- AppStatistics ---
 
 def test_app_statistics_record_and_get(isolated_files):

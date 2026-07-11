@@ -484,12 +484,22 @@ def compute_perf_transitions(old: dict, new: dict) -> list:
         actions.append('affinity_reset')
     return actions
 
-def apply_settings_after_admin_launch(parent, exe_path: str, app_data: dict, delay_ms: int = 2000, max_retries: int = 10):
-    """Retry applying settings after admin-launched app starts (ShellExecute)."""
+def apply_settings_after_admin_launch(parent, exe_path: str, app_data: dict, delay_ms: int = 2000,
+                                      max_retries: int = 10, on_found=None):
+    """Retry applying settings after admin-launched app starts (ShellExecute
+    returns no PID, and the UAC prompt delays startup by however long the user
+    takes). on_found(proc) fires once when the process is first seen running —
+    used to register crash watching at a point where a "not running" result
+    can't be mistaken for a pre-UAC state."""
     def retry(attempt=0):
         running, proc = is_app_running(exe_path)
         if proc:
             apply_performance_settings(proc, app_data)
+            if on_found:
+                try:
+                    on_found(proc)
+                except Exception as e:
+                    log_error("admin_launch.on_found", e)
             return
         try:
             if attempt < max_retries and parent.winfo_exists():
@@ -1793,6 +1803,15 @@ class SimLauncherApp(ctk.CTk):
             self.refresh_list_ui()
             self.show_toast(f"Deleted {app_name}", "#C0392B")
 
+    def _admin_watch_callback(self, app_data: dict):
+        """on_found callback for admin launches: start crash-watching the app
+        once it's confirmed running. No Popen exists for elevated launches, so
+        check_crashes falls back to its short-runtime heuristic."""
+        def on_found(proc):
+            if self.settings.get('crash_detection'):
+                self.crash_detector.register_app(app_data.get('path'), proc.pid, name=app_data.get('name'))
+        return on_found
+
     def launch_one(self, app_data: dict):
         if not app_data.get('enabled', True):
             self.show_toast("App is disabled", "#E67E22")
@@ -1814,7 +1833,8 @@ class SimLauncherApp(ctk.CTk):
                 except Exception as e:
                     log_error("Performance settings", e)
             else:
-                apply_settings_after_admin_launch(self, app_data.get('path'), app_data, delay_ms=2000)
+                apply_settings_after_admin_launch(self, app_data.get('path'), app_data, delay_ms=2000,
+                                                  on_found=self._admin_watch_callback(app_data))
             app_data['last_run'] = datetime.now().isoformat()
             self.save_data()
         except Exception as e:
@@ -1862,7 +1882,8 @@ class SimLauncherApp(ctk.CTk):
                             except Exception:
                                 pass
                         else:
-                            self.ui_call(apply_settings_after_admin_launch, self, app.get('path'), app, 2000)
+                            self.ui_call(apply_settings_after_admin_launch, self, app.get('path'), app, 2000,
+                                         on_found=self._admin_watch_callback(app))
                         launched += 1
                         app['last_run'] = datetime.now().isoformat()
                     except Exception as e:

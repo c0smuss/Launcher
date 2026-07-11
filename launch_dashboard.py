@@ -15,13 +15,8 @@ from PIL import Image, ImageDraw
 import pystray
 import queue
 from typing import Optional, Tuple
-import win32process
 import ctypes.wintypes
-from dataclasses import dataclass
-from enum import Enum
 from datetime import datetime
-import asyncio
-import hashlib
 import webbrowser
 from pathlib import Path
 from collections import defaultdict
@@ -53,7 +48,6 @@ DEFAULT_SETTINGS = {
     "launcher_eco_mode": True,
     "check_updates": True,
     "crash_detection": True,
-    "sound_notifications": False,
     "keyboard_shortcuts": {
         "launch_seq": "<Control-l>",
         "kill_all": "<Control-k>",
@@ -315,35 +309,6 @@ def apply_settings_after_admin_launch(parent, exe_path: str, app_data: dict, del
         except tk.TclError:
             pass
     parent.after(delay_ms, retry)
-
-# --- CONFIG MANAGEMENT ---
-@dataclass
-class AppConfig:
-    name: str
-    path: str
-    delay: int = 0
-    priority: str = "Normal"
-    affinity: list = None
-    admin: bool = False
-    enabled: bool = True
-    last_run: Optional[str] = None
-
-    def to_dict(self) -> dict:
-        return {
-            'name': self.name,
-            'path': self.path,
-            'delay': self.delay,
-            'priority': self.priority,
-            'affinity': self.affinity or [],
-            'admin': self.admin,
-            'enabled': self.enabled,
-            'last_run': self.last_run
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> 'AppConfig':
-        filtered = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
-        return cls(**filtered)
 
 # --- PROCESS TRACKER ---
 class ProcessTracker:
@@ -754,7 +719,7 @@ class AppStatistics:
             'last_run': s['last_launched'][-8:] if s.get('last_launched') else "Never"
         }
 
-# --- HOTKEY & PROFILE ASSISTANT (unchanged) ---
+# --- HOTKEY MANAGER ---
 class HotkeyManager:
     def __init__(self):
         self.hotkeys = {}
@@ -774,26 +739,7 @@ class HotkeyManager:
                 keyboard.remove_hotkey(hk)
         except Exception:
             pass
-
-class ProfileAssistant:
-    def __init__(self):
-        self.launch_history = []
-    def record_launch_combo(self, app_names: list):
-        combo_hash = hashlib.md5(','.join(sorted(app_names)).encode()).hexdigest()[:8]
-        self.launch_history.append({'timestamp': datetime.now().isoformat(), 'apps': app_names, 'hash': combo_hash})
-    def suggest_profile(self) -> tuple:
-        if len(self.launch_history) < 3:
-            return False, "", []
-        combos = defaultdict(int)
-        for record in self.launch_history[-20:]:
-            combos[record['hash']] += 1
-        if not combos:
-            return False, "", []
-        most_common = max(combos, key=combos.get)
-        for record in self.launch_history:
-            if record['hash'] == most_common and combos[most_common] >= 3:
-                return True, f"Suggested Profile ({combos[most_common]}x)", record['apps']
-        return False, "", []
+        self.hotkeys.clear()
 
 # --- SETTINGS DIALOG ---
 class SettingsDialog(ctk.CTkToplevel):
@@ -819,8 +765,6 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkCheckBox(scroll, text="Enable crash detection & recovery", variable=var_crash).pack(anchor="w", pady=5)
         var_autosave = ctk.BooleanVar(value=settings.get('auto_save_interval', 5000) > 0)
         ctk.CTkCheckBox(scroll, text="Auto-save config every 5 seconds", variable=var_autosave).pack(anchor="w", pady=5)
-        var_sound = ctk.BooleanVar(value=settings.get('sound_notifications', False))
-        ctk.CTkCheckBox(scroll, text="Sound notifications", variable=var_sound).pack(anchor="w", pady=5)
         var_minimize = ctk.BooleanVar(value=settings.get('minimize_on_launch', False))
         ctk.CTkCheckBox(scroll, text="Minimize app when launching sequence", variable=var_minimize).pack(anchor="w", pady=5)
         ctk.CTkLabel(scroll, text="Performance:", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
@@ -837,7 +781,6 @@ class SettingsDialog(ctk.CTkToplevel):
                 settings['monitor_interval'] = 2000
             settings['crash_detection'] = var_crash.get()
             settings['auto_save_interval'] = 5000 if var_autosave.get() else 0
-            settings['sound_notifications'] = var_sound.get()
             settings['minimize_on_launch'] = var_minimize.get()
             settings['launcher_eco_mode'] = var_launcher_eco.get()
             self.callback(settings)
@@ -883,16 +826,15 @@ class SimLauncherApp(ctk.CTk):
             log_error("set_app_icon", e)
         self.geometry("750x900")
         self.minsize(600, 700)
-        ctk.set_appearance_mode("Dark")
         self.protocol("WM_DELETE_WINDOW", self.minimize_to_tray)
         self.data = {"current_profile": "Default", "profiles": {"Default": []}}
         self.settings = self._load_settings()
+        ctk.set_appearance_mode(self.settings.get('theme', 'Dark'))
         if self.settings.get('launcher_eco_mode', True):
             set_eco_qos()
         self.process_tracker = ProcessTracker()
         self.crash_detector = CrashDetector()
         self.app_stats = AppStatistics()
-        self.profile_assistant = ProfileAssistant()
         self.hotkey_manager = HotkeyManager()
         self.load_data()
         self.create_widgets()
@@ -1022,6 +964,7 @@ class SimLauncherApp(ctk.CTk):
             self.settings = new_settings
             self._save_settings()
             self.setup_autosave()
+            ctk.set_appearance_mode(self.settings.get('theme', 'Dark'))
             set_eco_qos(enable=self.settings.get('launcher_eco_mode', True))
             self.show_toast("Settings saved", "#27AE60")
         SettingsDialog(self, self.settings, save_settings)
@@ -1185,7 +1128,6 @@ class SimLauncherApp(ctk.CTk):
         # The worker thread must not touch Tk directly; UI work goes via ui_call
         def run_seq():
             launched = 0
-            self.profile_assistant.record_launch_combo([a['name'] for a in enabled_apps])
             for app in enabled_apps:
                 if is_app_running(app.get('path'))[0]:
                     self.ui_call(self.show_toast, f"{app['name']} already running, skipping", "#E67E22")
@@ -1358,16 +1300,6 @@ class SimLauncherApp(ctk.CTk):
 def validate_app_data(app):
     required = ['name', 'path', 'delay', 'priority', 'affinity', 'admin']
     return all(k in app for k in required)
-
-class NotificationManager:
-    def __init__(self, parent):
-        self.parent = parent
-        self.queue = []
-
-    def show(self, msg, color="#333333", duration=3000):
-        lbl = ctk.CTkLabel(self.parent, text=msg, height=30, corner_radius=10, fg_color=color, text_color="white")
-        lbl.place(relx=0.5, rely=0.95, anchor="center")
-        self.parent.after(duration, lambda: (lbl.destroy() if lbl.winfo_exists() else None))
 
 if __name__ == "__main__":
     app = SimLauncherApp()

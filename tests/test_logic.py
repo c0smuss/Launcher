@@ -117,6 +117,25 @@ def test_icon_cache_returns_same_object_for_missing_path():
     assert a is b
 
 
+# --- config schema version ---
+
+def test_config_version_legacy_gets_stamped():
+    data = {"profiles": {}}
+    assert ld.check_config_version(data) is None
+    assert data["config_version"] == ld.CONFIG_VERSION
+
+
+def test_config_version_current_no_warning():
+    data = {"config_version": ld.CONFIG_VERSION}
+    assert ld.check_config_version(data) is None
+
+
+def test_config_version_future_warns():
+    data = {"config_version": ld.CONFIG_VERSION + 5}
+    msg = ld.check_config_version(data)
+    assert msg is not None and "newer version" in msg
+
+
 # --- start-with-Windows command builder ---
 
 def test_build_run_command_quotes_both_paths():

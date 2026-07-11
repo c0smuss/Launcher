@@ -1465,9 +1465,13 @@ class SimLauncherApp(ctk.CTk):
                     messagebox.showwarning("Warning", f"Config corrupted and no usable backup found.\nBroken file saved as {os.path.basename(corrupt_copy)}.")
         if self.data["current_profile"] not in self.data["profiles"]:
             self.data["current_profile"] = list(self.data["profiles"].keys())[0]
+        warning = check_config_version(self.data)
+        if warning:
+            messagebox.showwarning("Warning", warning)
 
     def save_data(self):
         try:
+            self.data["config_version"] = CONFIG_VERSION
             if os.path.exists(CONFIG_FILE):
                 try:
                     shutil.copy(CONFIG_FILE, f"{CONFIG_FILE}.bak")
@@ -2026,6 +2030,20 @@ class SimLauncherApp(ctk.CTk):
 def validate_app_data(app):
     required = ['name', 'path', 'delay', 'priority', 'affinity', 'admin']
     return all(k in app for k in required)
+
+CONFIG_VERSION = 1
+
+def check_config_version(data: dict) -> Optional[str]:
+    """Ensure data carries a config_version. Legacy configs (missing field) are
+    stamped to the current version. Returns a warning string if the config was
+    written by a newer version (best-effort load), else None."""
+    ver = data.get("config_version")
+    if ver is None:
+        data["config_version"] = CONFIG_VERSION
+        return None
+    if ver > CONFIG_VERSION:
+        return f"This config was written by a newer version of /Launch (schema v{ver}). Some settings may be ignored."
+    return None
 
 # Canonical defaults for a new app entry — shared by add_app and profile import
 DEFAULT_APP = {

@@ -1569,8 +1569,23 @@ class SimLauncherApp(ctk.CTk):
             self.refresh_list_ui()
             self.show_toast("Profile deleted", "#C0392B")
 
+    def _themed_menu(self) -> tk.Menu:
+        """A native tk.Menu sized and colored to match the CTk UI. Native menus
+        don't follow CustomTkinter's DPI scaling, so on a scaled monitor their
+        default font renders tiny — apply the same effective factor CTk uses."""
+        try:
+            scaling = ctk.ScalingTracker.get_widget_scaling(self)
+        except Exception:
+            scaling = 1.0
+        font = ("Segoe UI", max(9, round(12 * scaling)))
+        if ctk.get_appearance_mode() == "Dark":
+            colors = dict(bg="#2B2B2B", fg="#DCE4EE", activebackground="#1F6AA5", activeforeground="#FFFFFF")
+        else:
+            colors = dict(bg="#EBEBEB", fg="#1A1A1A", activebackground="#3B8ED0", activeforeground="#FFFFFF")
+        return tk.Menu(self, tearoff=0, font=font, bd=0, activeborderwidth=0, **colors)
+
     def _show_profile_menu(self):
-        menu = tk.Menu(self, tearoff=0)
+        menu = self._themed_menu()
         menu.add_command(label="New Profile…", command=self.add_profile)
         menu.add_command(label="Rename Profile…", command=self.rename_profile)
         menu.add_command(label="Duplicate Profile", command=self.duplicate_profile)

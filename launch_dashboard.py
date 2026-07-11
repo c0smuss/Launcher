@@ -1212,6 +1212,7 @@ class SimLauncherApp(ctk.CTk):
         self._ipc_socket = ipc_socket
         self._last_saved_payload = None
         self._profile_menu = None
+        self._toast_after_id = None
         self.race_mode = False
         self._boosted_pids = []
         self._race_boost_pending = False
@@ -1425,9 +1426,21 @@ class SimLauncherApp(ctk.CTk):
             self.toast_lbl.configure(text=message, fg_color=color)
             self.toast_lbl.place(relx=0.5, rely=0.95, anchor="center")
             self.toast_lbl.lift()
-            self.after(duration, lambda: (self.toast_lbl.place_forget() if self._alive() else None))
+            # Cancel the previous hide timer, or an earlier toast's timeout
+            # would hide this newer message ahead of its own duration
+            if self._toast_after_id:
+                try:
+                    self.after_cancel(self._toast_after_id)
+                except Exception:
+                    pass
+            self._toast_after_id = self.after(duration, self._hide_toast)
         except Exception:
             pass
+
+    def _hide_toast(self):
+        self._toast_after_id = None
+        if self._alive():
+            self.toast_lbl.place_forget()
 
     def notify(self, message: str, color: str = "#333333", duration: int = 3000):
         """In-window toast when visible; native tray notification when minimized.

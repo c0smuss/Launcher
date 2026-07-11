@@ -51,6 +51,11 @@ DEFAULT_SETTINGS = {
     "launcher_eco_mode": True,
     "check_updates": True,
     "crash_detection": True,
+    "race_mode_close_other_profiles": True,
+    "race_mode_presentation_mode": True,
+    "race_mode_boost_sim": True,
+    "race_mode_custom_kill": [],
+    "race_mode_sim_exes": ["iRacingSim64DX11.exe"],
     "global_hotkeys": True,
     "keyboard_shortcuts": {
         "launch_seq": "ctrl+alt+l",
@@ -398,6 +403,35 @@ def apply_performance_settings(proc: psutil.Process, app_data: dict) -> bool:
         log_error(f"Apply Settings {app_data.get('name')}", e)
         return False
     return success
+
+def collect_race_mode_kill_targets(profiles: dict, active_profile: str, sim_exes: list) -> list:
+    """Paths to close when entering race mode: apps in every profile OTHER than
+    the active one, minus any path also used by the active profile, minus any
+    path whose exe basename matches a configured sim exe (never kill the sim).
+    Deduped, order-stable, returns original paths."""
+    sim_lower = {(s or "").lower() for s in (sim_exes or [])}
+    active_paths = set()
+    for app in profiles.get(active_profile, []):
+        p = app.get('path')
+        if p:
+            active_paths.add(os.path.normpath(p).lower())
+    targets = []
+    seen = set()
+    for name, apps in profiles.items():
+        if name == active_profile:
+            continue
+        for app in apps:
+            p = app.get('path')
+            if not p:
+                continue
+            norm = os.path.normpath(p).lower()
+            if norm in active_paths or norm in seen:
+                continue
+            if os.path.basename(norm) in sim_lower:
+                continue
+            seen.add(norm)
+            targets.append(p)
+    return targets
 
 def compute_perf_transitions(old: dict, new: dict) -> list:
     """Extra actions needed when re-applying settings to an already-running
@@ -908,6 +942,22 @@ class SettingsDialog(ctk.CTkToplevel):
             e.pack(side="left", fill="x", expand=True)
             hotkey_entries[key] = e
 
+        ctk.CTkLabel(scroll, text="Race Mode:", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
+        var_rm_close = ctk.BooleanVar(value=settings.get('race_mode_close_other_profiles', True))
+        ctk.CTkCheckBox(scroll, text="Close apps from other profiles", variable=var_rm_close).pack(anchor="w", pady=3)
+        var_rm_present = ctk.BooleanVar(value=settings.get('race_mode_presentation_mode', True))
+        ctk.CTkCheckBox(scroll, text="Suppress notifications (Presentation Mode)", variable=var_rm_present).pack(anchor="w", pady=3)
+        var_rm_boost = ctk.BooleanVar(value=settings.get('race_mode_boost_sim', True))
+        ctk.CTkCheckBox(scroll, text="Boost sim to High priority", variable=var_rm_boost).pack(anchor="w", pady=3)
+        ctk.CTkLabel(scroll, text="Sim executables (comma-separated):", font=("Roboto", 10)).pack(anchor="w", pady=(5, 0))
+        entry_rm_sim = ctk.CTkEntry(scroll)
+        entry_rm_sim.insert(0, ", ".join(settings.get('race_mode_sim_exes', [])))
+        entry_rm_sim.pack(fill="x", pady=3)
+        ctk.CTkLabel(scroll, text="Also kill these exes (comma-separated):", font=("Roboto", 10)).pack(anchor="w", pady=(5, 0))
+        entry_rm_kill = ctk.CTkEntry(scroll)
+        entry_rm_kill.insert(0, ", ".join(settings.get('race_mode_custom_kill', [])))
+        entry_rm_kill.pack(fill="x", pady=3)
+
         btn_frame = ctk.CTkFrame(self, fg_color="transparent")
         btn_frame.pack(pady=15, fill="x", padx=20)
         def save_settings():
@@ -933,6 +983,11 @@ class SettingsDialog(ctk.CTkToplevel):
             settings['launcher_eco_mode'] = var_launcher_eco.get()
             settings['global_hotkeys'] = var_hotkeys.get()
             settings['keyboard_shortcuts'] = new_hotkeys
+            settings['race_mode_close_other_profiles'] = var_rm_close.get()
+            settings['race_mode_presentation_mode'] = var_rm_present.get()
+            settings['race_mode_boost_sim'] = var_rm_boost.get()
+            settings['race_mode_sim_exes'] = [x.strip() for x in entry_rm_sim.get().split(',') if x.strip()]
+            settings['race_mode_custom_kill'] = [x.strip() for x in entry_rm_kill.get().split(',') if x.strip()]
             self.callback(settings)
             self.destroy()
         ctk.CTkButton(btn_frame, text="Save", command=save_settings, fg_color="#27AE60", width=150).pack(side="left", padx=5)
@@ -966,6 +1021,9 @@ class SimLauncherApp(ctk.CTk):
         self._closing = False
         self._seq_running = False
         self._ipc_socket = ipc_socket
+        self.race_mode = False
+        self._boosted_pids = []
+        self._race_boost_pending = False
         self.report_callback_exception = self.show_error_popup
         self.title(f"{APP_NAME} v{VERSION}")
         try:
@@ -1215,6 +1273,9 @@ class SimLauncherApp(ctk.CTk):
         self.btn_launch_seq = ctk.CTkButton(self.actions, text="🚀 LAUNCH SEQUENCE", fg_color="#27AE60", hover_color="#2ECC71", command=self.launch_sequence, font=("Roboto", 14, "bold"))
         self.btn_launch_seq.pack(side="left", padx=20, fill="x", expand=True)
         ctk.CTkButton(self.actions, text="☠ KILL ALL", fg_color="#C0392B", hover_color="#E74C3C", command=self.kill_all, width=100).pack(side="right", padx=5)
+        self.btn_race_mode = ctk.CTkButton(self.actions, text="🏁 RACE MODE", fg_color="transparent", border_width=1,
+                                           hover_color="#C0392B", width=130, command=self.toggle_race_mode)
+        self.btn_race_mode.pack(side="right", padx=5)
         self.scroll = ctk.CTkScrollableFrame(self, label_text="Apps")
         self.scroll.pack(fill="both", expand=True, padx=20, pady=10)
 
@@ -1481,6 +1542,97 @@ class SimLauncherApp(ctk.CTk):
                 self.ui_call(self.monitor_processes_once)
             threading.Thread(target=worker, daemon=True).start()
 
+    # --- RACE MODE ---
+    def toggle_race_mode(self):
+        if self.race_mode:
+            self._exit_race_mode()
+        else:
+            self._enter_race_mode()
+
+    def _set_race_button(self):
+        if not hasattr(self, 'btn_race_mode'):
+            return
+        if self.race_mode:
+            self.btn_race_mode.configure(text="🏁 RACE MODE ON", fg_color="#C0392B", border_width=0)
+        else:
+            self.btn_race_mode.configure(text="🏁 RACE MODE", fg_color="transparent", border_width=1)
+
+    def _enter_race_mode(self):
+        self.race_mode = True
+        self._set_race_button()
+        logging.info("Race mode ON")
+        s = self.settings
+        targets = []
+        if s.get('race_mode_close_other_profiles', True):
+            targets = collect_race_mode_kill_targets(
+                self.data["profiles"], self.data["current_profile"], s.get('race_mode_sim_exes', []))
+        # INV-3: notify BEFORE presentation mode, which would suppress the toast
+        self.notify(f"Race mode ON — closing {len(targets)} apps", "#C0392B")
+        custom_kill = {x.strip().lower() for x in s.get('race_mode_custom_kill', []) if x and x.strip()}
+        if targets or custom_kill:
+            def worker():
+                for p in targets:
+                    kill_app_gracefully(p)
+                if custom_kill:
+                    for proc in psutil.process_iter(['name']):
+                        try:
+                            if (proc.info.get('name') or '').lower() in custom_kill:
+                                proc.terminate()
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            continue
+                self.ui_call(self.monitor_processes_once)
+            threading.Thread(target=worker, daemon=True).start()
+        if s.get('race_mode_presentation_mode', True):
+            self._set_presentation_mode(True)
+        self._boosted_pids = []
+        self._race_boost_pending = False
+        if s.get('race_mode_boost_sim', True):
+            if not self._boost_sim_now():
+                self._race_boost_pending = True  # re-checked each monitor tick
+
+    def _exit_race_mode(self):
+        # INV-3: release presentation mode BEFORE the notification
+        if self.settings.get('race_mode_presentation_mode', True):
+            self._set_presentation_mode(False)
+        for pid in getattr(self, '_boosted_pids', []):
+            try:
+                psutil.Process(pid).nice(psutil.NORMAL_PRIORITY_CLASS)
+            except Exception:
+                pass
+        self._boosted_pids = []
+        self._race_boost_pending = False
+        self.race_mode = False
+        self._set_race_button()
+        logging.info("Race mode OFF")
+        self.notify("Race mode OFF — apps left running", "#27AE60")
+
+    def _set_presentation_mode(self, on: bool):
+        """Toggle Windows Presentation Mode, which suppresses toasts/popups.
+        The only supported mechanism (no public Focus Assist API)."""
+        try:
+            exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "PresentationSettings.exe")
+            subprocess.run([exe, "/start" if on else "/stop"], timeout=10)
+        except Exception as e:
+            log_error("presentation_mode", e)
+            self.notify("Presentation mode unavailable", "#E67E22")
+
+    def _boost_sim_now(self) -> bool:
+        """Set HIGH priority on any running sim process. Returns True if a sim
+        was found (or there's nothing configured to look for)."""
+        sim_lower = {(x or "").lower() for x in self.settings.get('race_mode_sim_exes', []) if x}
+        if not sim_lower:
+            return True
+        found = False
+        for proc in psutil.process_iter(['name', 'pid']):
+            try:
+                if (proc.info.get('name') or '').lower() in sim_lower:
+                    proc.nice(psutil.HIGH_PRIORITY_CLASS)
+                    self._boosted_pids.append(proc.info['pid'])
+                    found = True
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        return found
+
     def monitor_processes(self):
         minimized = getattr(self, 'is_minimized_to_tray', False)
         delay = 10000 if minimized else self.settings.get('monitor_interval', 2000)
@@ -1492,6 +1644,13 @@ class SimLauncherApp(ctk.CTk):
                 self.crash_detector.check_crashes(self.on_app_crashed)
             except Exception as e:
                 log_error("monitor_processes.crash_check", e)
+        # Apply a pending sim boost once the sim shows up (race mode)
+        if getattr(self, '_race_boost_pending', False):
+            try:
+                if self._boost_sim_now():
+                    self._race_boost_pending = False
+            except Exception as e:
+                log_error("monitor_processes.sim_boost", e)
         if self._alive():
             self.after(delay, self.monitor_processes)
 
@@ -1545,6 +1704,12 @@ class SimLauncherApp(ctk.CTk):
         if self._closing:
             return
         logging.info("App exit")
+        # Never leave Presentation Mode / boosted priorities stuck after quit
+        if getattr(self, 'race_mode', False):
+            try:
+                self._exit_race_mode()
+            except Exception as e:
+                log_error("exit_app.race_mode", e)
         self.save_data()
         self._closing = True
         self.hotkey_manager.unregister_all()

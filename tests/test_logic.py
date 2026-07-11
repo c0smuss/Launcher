@@ -117,6 +117,51 @@ def test_icon_cache_returns_same_object_for_missing_path():
     assert a is b
 
 
+# --- race mode kill targets ---
+
+def _profiles():
+    return {
+        "iRacing": [
+            {"path": r"C:\iRacing\iRacingUI.exe"},
+            {"path": r"C:\sim\iRacingSim64DX11.exe"},
+        ],
+        "Plex": [
+            {"path": r"C:\Plex\Plex Media Server.exe"},
+            {"path": r"C:\qb\qbittorrent.exe"},
+        ],
+        "Work": [
+            {"path": r"C:\iRacing\iRacingUI.exe"},   # dup of an active-profile app
+            {"path": r"C:\sim\iRacingSim64DX11.exe"},  # a sim exe
+            {"path": r"C:\misc\slack.exe"},
+        ],
+    }
+
+
+def test_race_targets_collect_other_profiles():
+    targets = ld.collect_race_mode_kill_targets(_profiles(), "iRacing", ["iRacingSim64DX11.exe"])
+    lowered = {t.lower() for t in targets}
+    assert r"c:\plex\plex media server.exe" in lowered
+    assert r"c:\qb\qbittorrent.exe" in lowered
+    assert r"c:\misc\slack.exe" in lowered
+
+
+def test_race_targets_exclude_active_profile_paths():
+    targets = ld.collect_race_mode_kill_targets(_profiles(), "iRacing", ["iRacingSim64DX11.exe"])
+    # iRacingUI is used by the active profile → never a target even though Work lists it
+    assert all("iracingui.exe" not in t.lower() for t in targets)
+
+
+def test_race_targets_never_include_sim_exe():
+    targets = ld.collect_race_mode_kill_targets(_profiles(), "iRacing", ["iRacingSim64DX11.exe"])
+    assert all("iracingsim64dx11.exe" not in t.lower() for t in targets)
+
+
+def test_race_targets_dedupe():
+    profiles = {"A": [], "B": [{"path": r"C:\x\a.exe"}], "C": [{"path": r"C:\x\a.exe"}]}
+    targets = ld.collect_race_mode_kill_targets(profiles, "A", [])
+    assert len(targets) == 1
+
+
 # --- hotkey settings migration ---
 
 def test_migrate_replaces_legacy_tk_hotkeys():

@@ -1675,8 +1675,26 @@ class SimLauncherApp(ctk.CTk):
         self.is_minimized_to_tray = True
         threading.Thread(target=self.run_tray, daemon=True).start()
 
+    # Tray menu callbacks run on the pystray thread → route through ui_call (INV-8)
+    def _tray_launch(self, icon=None, item=None):
+        self.ui_call(self.launch_sequence)
+
+    def _tray_race_mode(self, icon=None, item=None):
+        self.ui_call(self.toggle_race_mode)
+
+    def _tray_kill_all(self, icon=None, item=None):
+        # _hotkey_kill_all restores the window first (INV-2) so the confirm shows
+        self.ui_call(self._hotkey_kill_all)
+
     def run_tray(self):
-        menu = pystray.Menu(pystray.MenuItem("Show", self.restore), pystray.MenuItem("Exit", self.quit_app))
+        menu = pystray.Menu(
+            pystray.MenuItem("Show", self.restore, default=True),
+            pystray.MenuItem("Launch Sequence", self._tray_launch),
+            pystray.MenuItem("Race Mode", self._tray_race_mode, checked=lambda item: self.race_mode),
+            pystray.MenuItem("Kill All", self._tray_kill_all),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Exit", self.quit_app),
+        )
         self.tray_icon = pystray.Icon("SL", create_tray_icon_image(), "/Launch", menu)
         try:
             self.tray_icon.run()

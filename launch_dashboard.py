@@ -37,6 +37,7 @@ VERSION = "1.1.0"
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_FILE = str(BASE_DIR / "launch_config.json")
 LOG_FILE = str(BASE_DIR / "app.log")
+ICON_FILE = str(BASE_DIR / "1f680.ico")
 
 # Files created by analytics / settings
 SETTINGS_FILE = str(BASE_DIR / "launcher_settings.json")
@@ -115,6 +116,11 @@ def get_placeholder_icon(size=32, color=(70, 130, 180)):
     return ctk.CTkImage(light_image=img, dark_image=img, size=(size, size))
 
 def create_tray_icon_image():
+    try:
+        if os.path.exists(ICON_FILE):
+            return Image.open(ICON_FILE)
+    except Exception:
+        pass
     width = 64; height = 64
     image = Image.new('RGB', (width, height), (30, 30, 30))
     dc = ImageDraw.Draw(image)
@@ -791,6 +797,14 @@ class SimLauncherApp(ctk.CTk):
         super().__init__()
         self.report_callback_exception = self.show_error_popup
         self.title(f"{APP_NAME} v{VERSION}")
+        try:
+            # Give the app its own taskbar identity so Windows shows our icon
+            # instead of grouping under the Python interpreter's
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SimLaunch")
+            if os.path.exists(ICON_FILE):
+                self.iconbitmap(ICON_FILE)
+        except Exception as e:
+            log_error("set_app_icon", e)
         self.geometry("750x900")
         self.minsize(600, 700)
         ctk.set_appearance_mode("Dark")

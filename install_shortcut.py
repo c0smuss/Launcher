@@ -15,7 +15,10 @@ def create_shortcut():
 
     # Desktop path
     desktop = shell.SHGetFolderPath(0, shellcon.CSIDL_DESKTOP, None, 0)
-    shortcut_path = os.path.join(desktop, "SimLaunch.lnk")
+    # WScript.Shell can't save to a filename containing the rocket emoji,
+    # so save under an ASCII name first and rename afterwards
+    shortcut_path = os.path.join(desktop, "_launch_tmp.lnk")
+    final_path = os.path.join(desktop, "🚀Launch.lnk")
 
     # Create shortcut
     ws = win32com.client.Dispatch("WScript.Shell")
@@ -23,12 +26,19 @@ def create_shortcut():
     shortcut.TargetPath = target
     shortcut.Arguments = f'"{script_path}"'
     shortcut.WorkingDirectory = current_dir
-    icon = os.path.join(current_dir, "car.ico")
+    icon = os.path.join(current_dir, "1f680.ico")
     shortcut.IconLocation = icon if os.path.exists(icon) else target
     shortcut.Description = "Sim Racing Launcher"
     shortcut.Save()
+    if os.path.exists(final_path):
+        os.remove(final_path)
+    os.rename(shortcut_path, final_path)
 
-    print(f"Shortcut created at: {shortcut_path}")
+    # Console may not be able to encode the emoji (cp1252)
+    try:
+        print(f"Shortcut created at: {final_path}")
+    except UnicodeEncodeError:
+        print(f"Shortcut created on Desktop: {os.path.basename(final_path).encode('ascii', 'replace').decode()}")
 
 if __name__ == "__main__":
     try:

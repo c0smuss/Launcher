@@ -7,6 +7,7 @@ import json
 import socket
 import argparse
 import copy
+import urllib.request
 import threading
 import time
 import psutil
@@ -30,6 +31,8 @@ import sys
 # --- GLOBAL CONSTANTS ---
 APP_NAME = "/Launch"
 VERSION = "1.2.0"
+REPO_URL = "https://github.com/c0smuss/Launcher"
+VERSION_URL = "https://raw.githubusercontent.com/c0smuss/Launcher/main/VERSION"
 
 # Anchor all data files to the script's folder so launching from a different
 # working directory (e.g. a shortcut) doesn't create a fresh empty config.
@@ -967,6 +970,8 @@ class SettingsDialog(ctk.CTkToplevel):
         # INV-6: initial state comes from the registry, never launcher_settings.json
         var_startup = ctk.BooleanVar(value=is_run_at_startup())
         ctk.CTkCheckBox(scroll, text="Start with Windows (minimized to tray)", variable=var_startup).pack(anchor="w", pady=5)
+        var_updates = ctk.BooleanVar(value=settings.get('check_updates', True))
+        ctk.CTkCheckBox(scroll, text="Check for updates on startup", variable=var_updates).pack(anchor="w", pady=5)
 
         ctk.CTkLabel(scroll, text="Hotkeys (global):", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
         var_hotkeys = ctk.BooleanVar(value=settings.get('global_hotkeys', True))
@@ -1034,6 +1039,7 @@ class SettingsDialog(ctk.CTkToplevel):
             settings['race_mode_boost_sim'] = var_rm_boost.get()
             settings['race_mode_sim_exes'] = [x.strip() for x in entry_rm_sim.get().split(',') if x.strip()]
             settings['race_mode_custom_kill'] = [x.strip() for x in entry_rm_kill.get().split(',') if x.strip()]
+            settings['check_updates'] = var_updates.get()
             # Startup entry lives in the registry, not in settings (INV-6)
             try:
                 set_run_at_startup(var_startup.get())
@@ -1205,6 +1211,7 @@ class SimLauncherApp(ctk.CTk):
             self.after(200, self.minimize_to_tray)
         if auto_launch:
             self.after(800, self.launch_sequence)
+        self.after(1500, self._check_for_updates)
         logging.info(f"App start v{VERSION} (profile={cli_profile}, launch={auto_launch}, minimized={start_minimized})")
 
     def _alive(self) -> bool:
@@ -1415,6 +1422,42 @@ class SimLauncherApp(ctk.CTk):
         ctk.CTkButton(self.actions, text="📊", width=40, fg_color="#34495E", command=self.open_stats).pack(side="right", padx=5)
         self.scroll = ctk.CTkScrollableFrame(self, label_text="Apps")
         self.scroll.pack(fill="both", expand=True, padx=20, pady=10)
+
+    def _check_for_updates(self):
+        """Once/day at most, fetch the repo's VERSION file and notify if newer.
+        All failures are silent (logged at INFO). One HTTPS GET to GitHub."""
+        if not self.settings.get('check_updates', True):
+            return
+        last = self.settings.get('last_update_check')
+        now = time.time()
+        if last and (now - last) < 86400:
+            return
+        self.settings['last_update_check'] = now
+        self._save_settings()
+        def worker():
+            try:
+                with urllib.request.urlopen(VERSION_URL, timeout=5) as resp:
+                    remote = resp.read(64).decode('utf-8', 'replace').strip()
+                if is_newer_version(remote, VERSION):
+                    self.ui_call(self._on_update_available, remote)
+                else:
+                    logging.info(f"Update check: up to date (remote {remote})")
+            except Exception as e:
+                logging.info(f"Update check failed: {e}")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_available(self, remote: str):
+        self.notify(f"Update available: v{remote}", "#2980B9", duration=6000)
+        try:
+            if getattr(self, '_update_label', None) and self._update_label.winfo_exists():
+                return
+            self._update_label = ctk.CTkLabel(self.header, text=f"⬇ v{remote} available",
+                                              text_color="#3498DB", cursor="hand2",
+                                              font=("Roboto", 11, "underline"))
+            self._update_label.place(relx=0.5, rely=0.85, anchor="center")
+            self._update_label.bind("<Button-1>", lambda e: webbrowser.open(REPO_URL))
+        except Exception as e:
+            log_error("update_label", e)
 
     def open_stats(self):
         def do_reset():
@@ -2030,6 +2073,16 @@ class SimLauncherApp(ctk.CTk):
 def validate_app_data(app):
     required = ['name', 'path', 'delay', 'priority', 'affinity', 'admin']
     return all(k in app for k in required)
+
+def is_newer_version(remote: str, local: str) -> bool:
+    """True if remote is a strictly newer dotted version than local. Any parse
+    failure returns False so we never nag on a garbage response."""
+    def parse(v):
+        return tuple(int(x) for x in str(v).strip().split("."))
+    try:
+        return parse(remote) > parse(local)
+    except (ValueError, AttributeError):
+        return False
 
 CONFIG_VERSION = 1
 

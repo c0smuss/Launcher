@@ -117,6 +117,22 @@ def test_icon_cache_returns_same_object_for_missing_path():
     assert a is b
 
 
+# --- update version comparison ---
+
+def test_is_newer_version():
+    assert ld.is_newer_version("1.3.0", "1.3.0") is False
+    assert ld.is_newer_version("1.3.1", "1.3.0") is True
+    assert ld.is_newer_version("1.10.0", "1.9.0") is True   # numeric, not lexical
+    assert ld.is_newer_version("1.2.0", "1.3.0") is False
+    assert ld.is_newer_version("2.0.0", "1.9.9") is True
+
+
+def test_is_newer_version_garbage_is_false():
+    assert ld.is_newer_version("garbage", "1.3.0") is False
+    assert ld.is_newer_version("", "1.3.0") is False
+    assert ld.is_newer_version(None, "1.3.0") is False
+
+
 # --- config schema version ---
 
 def test_config_version_legacy_gets_stamped():

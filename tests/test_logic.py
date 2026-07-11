@@ -82,6 +82,32 @@ def test_app_statistics_unknown_returns_empty(isolated_files):
     assert stats.get_stats("Nonexistent") == {}
 
 
+# --- perf transitions on edit ---
+
+def test_perf_transition_eco_disable_detected():
+    old = {"eco_mode": True, "affinity": []}
+    new = {"eco_mode": False, "affinity": []}
+    assert ld.compute_perf_transitions(old, new) == ["eco_disable"]
+
+
+def test_perf_transition_affinity_reset_detected():
+    old = {"eco_mode": False, "affinity": [0, 1]}
+    new = {"eco_mode": False, "affinity": []}
+    assert ld.compute_perf_transitions(old, new) == ["affinity_reset"]
+
+
+def test_perf_transition_none_when_enabling():
+    old = {"eco_mode": False, "affinity": []}
+    new = {"eco_mode": True, "affinity": [0, 1]}
+    assert ld.compute_perf_transitions(old, new) == []
+
+
+def test_perf_transition_both():
+    old = {"eco_mode": True, "affinity": [2, 3]}
+    new = {"eco_mode": False, "affinity": []}
+    assert set(ld.compute_perf_transitions(old, new)) == {"eco_disable", "affinity_reset"}
+
+
 # --- icon cache ---
 
 def test_icon_cache_returns_same_object_for_missing_path():

@@ -319,6 +319,19 @@ def apply_performance_settings(proc: psutil.Process, app_data: dict) -> bool:
         return False
     return success
 
+def compute_perf_transitions(old: dict, new: dict) -> list:
+    """Extra actions needed when re-applying settings to an already-running
+    process, beyond apply_performance_settings (which only *enables* eco and
+    skips empty affinity). Returns action tags: 'eco_disable', 'affinity_reset'."""
+    actions = []
+    if old.get('eco_mode') and not new.get('eco_mode'):
+        actions.append('eco_disable')
+    old_aff = old.get('affinity') or []
+    new_aff = new.get('affinity') or []
+    if old_aff and not new_aff:
+        actions.append('affinity_reset')
+    return actions
+
 def apply_settings_after_admin_launch(parent, exe_path: str, app_data: dict, delay_ms: int = 2000, max_retries: int = 10):
     """Retry applying settings after admin-launched app starts (ShellExecute)."""
     def retry(attempt=0):
@@ -1097,12 +1110,35 @@ class SimLauncherApp(ctk.CTk):
             self.show_toast(f"Added {name}", "#27AE60")
 
     def edit_app_row(self, row):
+        old_data = dict(self.get_current_apps()[row.index])
         def save(new_d):
             self.get_current_apps()[row.index] = new_d
             self.save_data()
+            self._apply_edits_to_running(old_data, new_d)
             self.refresh_list_ui()
             self.show_toast("Settings saved", "#27AE60")
         AppSettingsDialog(self, self.get_current_apps()[row.index], save)
+
+    def _apply_edits_to_running(self, old_data: dict, new_data: dict):
+        """If the edited app is running, apply priority/affinity/eco changes
+        immediately so they don't wait for a relaunch. Failures log, never
+        block the save."""
+        try:
+            running, proc = is_app_running(new_data.get('path'))
+            if not running or not proc:
+                return
+            apply_performance_settings(proc, new_data)
+            for action in compute_perf_transitions(old_data, new_data):
+                try:
+                    if action == 'eco_disable':
+                        set_eco_qos(proc.pid, enable=False)
+                    elif action == 'affinity_reset':
+                        proc.cpu_affinity(list(range(psutil.cpu_count())))
+                except Exception as e:
+                    log_error("apply_edits_to_running.transition", e)
+            self.show_toast("Applied to running process", "#2980B9")
+        except Exception as e:
+            log_error("apply_edits_to_running", e)
 
     def delete_app_row(self, row):
         app_name = self.get_current_apps()[row.index].get('name', 'App')

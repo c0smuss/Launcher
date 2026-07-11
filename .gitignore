@@ -9,6 +9,10 @@ launcher_settings.json
 app_statistics.json
 crash_history.json
 app.log
+app.log.*
+
+# Exported profiles (may contain personal paths)
+*.launchprofile.json
 
 # Old snapshot kept locally only
 Launch-v1/

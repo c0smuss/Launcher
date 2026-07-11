@@ -8,6 +8,7 @@ import threading
 import time
 import psutil
 import logging
+from logging.handlers import RotatingFileHandler
 import traceback
 import shutil
 import ctypes
@@ -66,7 +67,14 @@ PRIORITY_MAP = {
 }
 
 # --- LOGGING ---
-logging.basicConfig(filename=LOG_FILE, level=logging.ERROR, format='%(asctime)s:%(levelname)s:%(message)s')
+# RotatingFileHandler with delay=True: the file isn't opened until the first
+# record is emitted, so merely importing this module creates no app.log
+# (keeps imports side-effect-free for tests/CI). Rotates at 512 KB, keeps 2.
+_log_handler = RotatingFileHandler(LOG_FILE, maxBytes=512 * 1024, backupCount=2, delay=True)
+_log_handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(message)s'))
+_root_logger = logging.getLogger()
+_root_logger.setLevel(logging.INFO)
+_root_logger.addHandler(_log_handler)
 
 def log_error(context, e):
     print(f"Error in {context}: {e}")
@@ -846,6 +854,7 @@ class SimLauncherApp(ctk.CTk):
         self.monitor_processes()
         self.setup_autosave()
         self.setup_hotkeys()
+        logging.info(f"App start v{VERSION}")
 
     def _alive(self) -> bool:
         """True while the window exists and isn't shutting down. winfo_exists
@@ -1096,6 +1105,7 @@ class SimLauncherApp(ctk.CTk):
             self.show_toast(f"{app_data['name']} already running", "#E67E22")
             return
         try:
+            logging.info(f"launch_one: {app_data.get('name')}")
             self.app_stats.record_launch(app_data['name'])
             proc = launch_executable(app_data)
             self.show_toast(f"Launching {app_data['name']}...", "#2980B9")
@@ -1128,6 +1138,7 @@ class SimLauncherApp(ctk.CTk):
         # The worker thread must not touch Tk directly; UI work goes via ui_call
         def run_seq():
             launched = 0
+            logging.info(f"Launch sequence start: {len(enabled_apps)} enabled apps")
             for app in enabled_apps:
                 if is_app_running(app.get('path'))[0]:
                     self.ui_call(self.show_toast, f"{app['name']} already running, skipping", "#E67E22")
@@ -1155,6 +1166,7 @@ class SimLauncherApp(ctk.CTk):
                     log_error(f"Seq {app['name']}", e)
                 delay = app.get('delay', 0)
                 time.sleep(delay if delay > 0 else 1.5)
+            logging.info(f"Launch sequence complete: launched {launched} apps")
             def finish():
                 self.save_data()
                 self.show_toast(f"Sequence complete! Launched {launched} apps", "#27AE60")
@@ -1240,6 +1252,7 @@ class SimLauncherApp(ctk.CTk):
         """Shut down cleanly. Must run on the main thread."""
         if self._closing:
             return
+        logging.info("App exit")
         self.save_data()
         self._closing = True
         self.hotkey_manager.unregister_all()

@@ -117,6 +117,19 @@ def test_icon_cache_returns_same_object_for_missing_path():
     assert a is b
 
 
+# --- start-with-Windows command builder ---
+
+def test_build_run_command_quotes_both_paths():
+    cmd = ld.build_run_command(r"C:\Py\pythonw.exe", r"C:\App\launch_dashboard.py")
+    assert cmd == '"C:\\Py\\pythonw.exe" "C:\\App\\launch_dashboard.py" --minimized'
+
+
+def test_build_run_command_handles_spaces():
+    cmd = ld.build_run_command(r"C:\Program Files\pythonw.exe", r"C:\My Apps\launch_dashboard.py")
+    assert cmd.startswith('"C:\\Program Files\\pythonw.exe"')
+    assert cmd.endswith("--minimized")
+
+
 # --- duration formatting ---
 
 def test_fmt_duration_boundaries():

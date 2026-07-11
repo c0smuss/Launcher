@@ -142,6 +142,39 @@ def forward_to_primary(message: dict) -> bool:
     except Exception:
         return False
 
+# --- START WITH WINDOWS (HKCU Run key) ---
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE_NAME = "SimLaunch"
+
+def _pythonw_path() -> str:
+    target = sys.executable.replace("python.exe", "pythonw.exe")
+    return target if os.path.exists(target) else sys.executable
+
+def build_run_command(pythonw: str, script: str) -> str:
+    """HKCU Run value: launch minimized to tray with pythonw (no console)."""
+    return f'"{pythonw}" "{script}" --minimized'
+
+def is_run_at_startup() -> bool:
+    """Registry is the source of truth (INV-6), not the settings file."""
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            winreg.QueryValueEx(k, RUN_VALUE_NAME)
+            return True
+    except OSError:
+        return False
+
+def set_run_at_startup(enable: bool):
+    if enable:
+        cmd = build_run_command(_pythonw_path(), os.path.abspath(__file__))
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, RUN_VALUE_NAME, 0, winreg.REG_SZ, cmd)
+    else:
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, RUN_VALUE_NAME)
+        except FileNotFoundError:
+            pass
+
 # CPU Priority Map
 PRIORITY_MAP = {
     "Realtime": psutil.REALTIME_PRIORITY_CLASS,
@@ -930,6 +963,11 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkCheckBox(scroll, text="Run launcher in Efficiency Mode (EcoQoS) — leaves more CPU for the sim",
                         variable=var_launcher_eco).pack(anchor="w", pady=5)
 
+        ctk.CTkLabel(scroll, text="Startup:", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
+        # INV-6: initial state comes from the registry, never launcher_settings.json
+        var_startup = ctk.BooleanVar(value=is_run_at_startup())
+        ctk.CTkCheckBox(scroll, text="Start with Windows (minimized to tray)", variable=var_startup).pack(anchor="w", pady=5)
+
         ctk.CTkLabel(scroll, text="Hotkeys (global):", font=("Roboto", 12, "bold")).pack(anchor="w", pady=(10, 5))
         var_hotkeys = ctk.BooleanVar(value=settings.get('global_hotkeys', True))
         ctk.CTkCheckBox(scroll, text="Enable global hotkeys", variable=var_hotkeys).pack(anchor="w", pady=5)
@@ -996,6 +1034,12 @@ class SettingsDialog(ctk.CTkToplevel):
             settings['race_mode_boost_sim'] = var_rm_boost.get()
             settings['race_mode_sim_exes'] = [x.strip() for x in entry_rm_sim.get().split(',') if x.strip()]
             settings['race_mode_custom_kill'] = [x.strip() for x in entry_rm_kill.get().split(',') if x.strip()]
+            # Startup entry lives in the registry, not in settings (INV-6)
+            try:
+                set_run_at_startup(var_startup.get())
+            except Exception as e:
+                log_error("set_run_at_startup", e)
+                messagebox.showwarning("Warning", "Couldn't update the Windows startup setting.")
             self.callback(settings)
             self.destroy()
         ctk.CTkButton(btn_frame, text="Save", command=save_settings, fg_color="#27AE60", width=150).pack(side="left", padx=5)

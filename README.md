@@ -1,6 +1,21 @@
 # /Launch — Sim Racing Command Center
 
+![tests](https://github.com/c0smuss/Launcher/actions/workflows/tests.yml/badge.svg)
+
 A Windows desktop launcher for sim-racing setups. Add your companion apps (telemetry, head tracking, wheel software, overlays), set per-app CPU priority/affinity and launch delays, then start everything with one click.
+
+## What's new in v1.3
+- **One-click race day** — a `🏁 iRacing` desktop shortcut selects the iRacing profile, launches the whole stack, and sits in the tray, announcing completion with a native notification. Runs the app via CLI flags (`--profile`, `--launch`, `--minimized`).
+- **Single instance** — launching a second time forwards to the running launcher instead of opening a duplicate that fights over the config.
+- **Race Mode** (button + `Ctrl+Alt+R`) — closes apps from other profiles, turns on Windows Presentation Mode to silence notifications, and boosts the sim to High priority; everything reverts on toggle-off or exit.
+- **Global hotkeys** — launch sequence, kill all, race mode, and show/hide, working even while the sim has focus (configurable in Settings).
+- **Tray quick actions** — Launch Sequence, Race Mode, and Kill All from the tray menu.
+- **Native notifications** when minimized to the tray.
+- **Profile management** — rename, duplicate, and export/import profiles as JSON (under the `⋮` menu).
+- **Statistics view** (📊) — a summary and per-app table built from the data collected since v1.0.
+- **Start with Windows** — optional boot-to-tray via a Settings checkbox.
+- **Update check** — an optional once-a-day check against this repo's latest version.
+- **Live theme switching**, rotating logs, and an update checker round out the release.
 
 ## What's new in v1.2
 - **Efficiency Mode (EcoQoS)** — per-app opt-in to Windows 11 power throttling: the scheduler runs the app on E-cores at low clocks (shows as "Efficiency mode" in Task Manager). Ideal for background helpers, leaving P-cores and thermal headroom to the sim. Configured in the app's ⚙ settings; eco apps show a 🍃 tag.
@@ -20,29 +35,40 @@ A Windows desktop launcher for sim-racing setups. Add your companion apps (telem
 
 ## Features
 - Launch sequencing with per-app delays and drag-to-reorder
-- Per-app CPU priority and core affinity (P-core / E-core presets)
+- Per-app CPU priority, core affinity (P-core / E-core presets), and Efficiency Mode (EcoQoS)
 - Run-as-Administrator support (UAC prompt)
-- Multiple profiles (e.g. one per sim, or non-racing sets)
-- Live process status with memory/CPU readouts per app
-- Crash detection with history, plus per-app launch/runtime statistics
-- Minimize to system tray
+- Multiple profiles with rename / duplicate / export / import
+- Race Mode: close distractions, silence notifications, boost the sim
+- Global hotkeys and tray quick actions
+- One-click per-profile desktop shortcuts; optional start-with-Windows
+- Live process status, crash detection, and a statistics view
+- Minimize to system tray with native notifications
 
 ## Quick Start
 1. Install requirements:
    ```
    pip install -r requirements.txt
    ```
-2. (Optional) Create a desktop icon:
+2. (Optional) Create desktop shortcuts:
    ```
    python install_shortcut.py
    ```
+   This creates **🚀Launch** (opens the launcher) and **🏁 iRacing** (launches the iRacing profile straight to the tray). Generate one for any profile with `python install_shortcut.py --profile "<name>"`.
 3. Start the app:
    ```
    python launch_dashboard.py
    ```
-   or double-click the desktop "SimLaunch" icon.
+   or double-click a desktop shortcut.
 
-Requires Windows 10/11 and Python 3.9+.
+Requires Windows 10/11 and Python 3.9+. `keyboard` (in `requirements.txt`) enables global hotkeys; Efficiency Mode and Presentation Mode need Windows 11.
+
+## Development
+Run the test suite (pure-logic tests, no GUI):
+```
+pip install pytest
+python -m pytest tests/ -q
+```
+Tests run automatically on every push via GitHub Actions (`windows-latest`, Python 3.13).
 
 ## How to enable "Run as Admin"
 1. Add an app (e.g., CrewChief).

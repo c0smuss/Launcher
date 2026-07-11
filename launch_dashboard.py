@@ -30,7 +30,7 @@ import sys
 
 # --- GLOBAL CONSTANTS ---
 APP_NAME = "/Launch"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 REPO_URL = "https://github.com/c0smuss/Launcher"
 VERSION_URL = "https://raw.githubusercontent.com/c0smuss/Launcher/main/VERSION"
 

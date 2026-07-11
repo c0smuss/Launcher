@@ -144,6 +144,29 @@ def test_parse_ipc_rejects_oversized():
     assert ld.parse_ipc_message(huge) is None
 
 
+# --- CLI args -> IPC message ---
+
+class _Args:
+    def __init__(self, profile=None, launch=False, minimized=False):
+        self.profile = profile
+        self.launch = launch
+        self.minimized = minimized
+
+
+def test_cli_launch_with_profile_maps_to_launch():
+    msg = ld.cli_args_to_ipc_message(_Args(profile="iRacing", launch=True))
+    assert msg == {"action": "launch", "profile": "iRacing"}
+
+
+def test_cli_launch_without_profile():
+    assert ld.cli_args_to_ipc_message(_Args(launch=True)) == {"action": "launch"}
+
+
+def test_cli_no_launch_maps_to_show():
+    assert ld.cli_args_to_ipc_message(_Args(profile="iRacing")) == {"action": "show"}
+    assert ld.cli_args_to_ipc_message(_Args()) == {"action": "show"}
+
+
 # --- validate_app_data ---
 
 def test_validate_app_data_accepts_complete_record():

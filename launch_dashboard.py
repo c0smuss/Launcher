@@ -5,6 +5,7 @@ import os
 import subprocess
 import json
 import socket
+import argparse
 import threading
 import time
 import psutil
@@ -77,6 +78,17 @@ def parse_ipc_message(line: str) -> Optional[dict]:
     if not isinstance(msg, dict) or msg.get("action") not in _IPC_ACTIONS:
         return None
     return msg
+
+def cli_args_to_ipc_message(args) -> dict:
+    """Map parsed CLI args to the command a second instance forwards to the
+    primary. --launch (optionally with --profile) becomes a launch; anything
+    else just surfaces the existing window."""
+    if getattr(args, "launch", False):
+        msg = {"action": "launch"}
+        if getattr(args, "profile", None):
+            msg["profile"] = args.profile
+        return msg
+    return {"action": "show"}
 
 def acquire_single_instance():
     """Bind the IPC port. Returns the listening socket if we're the primary,
@@ -900,7 +912,7 @@ class EnhancedDraggableRow(DraggableRow):
 
 # --- MAIN APP ---
 class SimLauncherApp(ctk.CTk):
-    def __init__(self, ipc_socket=None):
+    def __init__(self, ipc_socket=None, cli_profile=None, auto_launch=False, start_minimized=False):
         super().__init__()
         self._closing = False
         self._seq_running = False
@@ -939,7 +951,18 @@ class SimLauncherApp(ctk.CTk):
         self.setup_hotkeys()
         if self._ipc_socket is not None:
             threading.Thread(target=self._ipc_accept_loop, daemon=True).start()
-        logging.info(f"App start v{VERSION}")
+        # CLI-driven startup (from a shortcut like the iRacing one)
+        if cli_profile:
+            match = self._match_profile(cli_profile)
+            if match:
+                self.change_profile(match)
+            else:
+                self.notify(f"Profile '{cli_profile}' not found", "#E67E22")
+        if start_minimized:
+            self.after(200, self.minimize_to_tray)
+        if auto_launch:
+            self.after(800, self.launch_sequence)
+        logging.info(f"App start v{VERSION} (profile={cli_profile}, launch={auto_launch}, minimized={start_minimized})")
 
     def _alive(self) -> bool:
         """True while the window exists and isn't shutting down. winfo_exists
@@ -1506,10 +1529,18 @@ def validate_app_data(app):
     return all(k in app for k in required)
 
 if __name__ == "__main__":
+    # add_help=False + parse_known_args: under pythonw.exe there is no console,
+    # so argparse's error/exit on unknown args would be an invisible no-launch.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--profile")
+    parser.add_argument("--launch", action="store_true")
+    parser.add_argument("--minimized", action="store_true")
+    args, _ = parser.parse_known_args()
+
     ipc_socket = acquire_single_instance()
     if ipc_socket is None:
         # Port already bound — forward our intent to the running instance.
-        if forward_to_primary({"action": "show"}):
+        if forward_to_primary(cli_args_to_ipc_message(args)):
             sys.exit(0)
         # The port is held by something that isn't us: fail closed with a
         # clear message rather than run a second GUI fighting over the config.
@@ -1523,7 +1554,8 @@ if __name__ == "__main__":
         except Exception:
             pass
         sys.exit(1)
-    app = SimLauncherApp(ipc_socket=ipc_socket)
+    app = SimLauncherApp(ipc_socket=ipc_socket, cli_profile=args.profile,
+                         auto_launch=args.launch, start_minimized=args.minimized)
     app.mainloop()
 
 

@@ -835,30 +835,39 @@ class CrashDetector:
     def check_crashes(self, callback_on_crash=None):
         crashed = []
         for exe_path, data in list(self.watch_list.items()):
+            popen = data.get('popen')
+            # Fast path: our own handle says the process is alive — no need to
+            # scan the process table (this used to cost one full scan per
+            # watched app per monitor tick).
+            if popen is not None and popen.poll() is None:
+                continue
+            # Handle is gone (or we never had one): fall back to the path scan
+            # so a same-exe successor (launcher stub → real app) still counts
+            # as running.
             running, _ = is_app_running(exe_path)
-            if not running:
-                del self.watch_list[exe_path]
-                runtime = time.time() - data['started']
-                popen = data.get('popen')
-                if popen is not None:
-                    # Exit code 0 = user closed the app normally, not a crash
-                    exit_code = popen.poll()
-                    is_crash = exit_code is not None and exit_code != 0
-                else:
-                    # No exit code available; only treat very short runs as crashes
-                    exit_code = None
-                    is_crash = runtime < 30
-                if not is_crash:
-                    continue
-                crash_record = {
-                    'app': data['name'],
-                    'timestamp': datetime.now().isoformat(),
-                    'runtime_seconds': runtime,
-                    'exit_code': exit_code,
-                    'retry_count': data['retries']
-                }
-                self.crash_history.setdefault(exe_path, []).append(crash_record)
-                crashed.append((exe_path, data, runtime))
+            if running:
+                continue
+            del self.watch_list[exe_path]
+            runtime = time.time() - data['started']
+            if popen is not None:
+                # Exit code 0 = user closed the app normally, not a crash
+                exit_code = popen.poll()
+                is_crash = exit_code is not None and exit_code != 0
+            else:
+                # No exit code available; only treat very short runs as crashes
+                exit_code = None
+                is_crash = runtime < 30
+            if not is_crash:
+                continue
+            crash_record = {
+                'app': data['name'],
+                'timestamp': datetime.now().isoformat(),
+                'runtime_seconds': runtime,
+                'exit_code': exit_code,
+                'retry_count': data['retries']
+            }
+            self.crash_history.setdefault(exe_path, []).append(crash_record)
+            crashed.append((exe_path, data, runtime))
         if crashed:
             self._save_crash_history()
             if callback_on_crash:

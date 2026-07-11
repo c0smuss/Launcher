@@ -65,6 +65,18 @@ def test_crash_detector_no_popen_long_runtime_is_not_a_crash(isolated_files):
     assert crashed == []
 
 
+def test_crash_detector_alive_popen_stays_watched_without_scan(isolated_files, monkeypatch):
+    """poll() is None → process alive → no process-table scan, entry kept."""
+    cd = ld.CrashDetector()
+    cd.register_app(r"C:\fake\alive.exe", 127, name="AliveApp", popen=FakePopen(None))
+    def fail_scan(path):
+        raise AssertionError("is_app_running must not be called when popen is alive")
+    monkeypatch.setattr(ld, "is_app_running", fail_scan)
+    crashed = cd.check_crashes()
+    assert crashed == []
+    assert r"C:\fake\alive.exe" in cd.watch_list
+
+
 # --- AppStatistics ---
 
 def test_app_statistics_record_and_get(isolated_files):

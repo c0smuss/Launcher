@@ -117,6 +117,56 @@ def test_icon_cache_returns_same_object_for_missing_path():
     assert a is b
 
 
+# --- profile import validation ---
+
+def test_import_good_profile_fills_defaults():
+    payload = {"launch_profile_version": 1, "name": "P",
+               "apps": [{"name": "A", "path": r"C:\nope\a.exe"}]}
+    apps, missing = ld.parse_profile_import(payload)
+    assert len(apps) == 1
+    assert apps[0]["priority"] == "Normal"      # default filled
+    assert apps[0]["eco_mode"] is False
+    assert missing == 1                          # path doesn't exist
+
+
+def test_import_rejects_non_dict():
+    import pytest
+    with pytest.raises(ValueError):
+        ld.parse_profile_import([1, 2, 3])
+
+
+def test_import_rejects_missing_apps_key():
+    import pytest
+    with pytest.raises(ValueError):
+        ld.parse_profile_import({"name": "P"})
+
+
+def test_import_rejects_entry_without_name_or_path():
+    import pytest
+    with pytest.raises(ValueError):
+        ld.parse_profile_import({"apps": [{"path": r"C:\x.exe"}]})  # no name
+    with pytest.raises(ValueError):
+        ld.parse_profile_import({"apps": [{"name": "A"}]})          # no path
+
+
+def test_stats_rename_moves_key(isolated_files):
+    stats = ld.AppStatistics()
+    stats.record_launch("Old")
+    stats.rename("Old", "New")
+    assert "New" in stats.stats and "Old" not in stats.stats
+
+
+def test_stats_rename_no_merge_when_target_exists(isolated_files):
+    stats = ld.AppStatistics()
+    stats.record_launch("Old")
+    stats.record_launch("New")
+    stats.record_launch("New")
+    stats.rename("Old", "New")
+    # New already existed → left untouched (2 launches), Old still present
+    assert stats.stats["New"]["total_launches"] == 2
+    assert "Old" in stats.stats
+
+
 # --- race mode kill targets ---
 
 def _profiles():

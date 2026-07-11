@@ -6,6 +6,7 @@ import subprocess
 import json
 import socket
 import argparse
+import copy
 import threading
 import time
 import psutil
@@ -858,6 +859,13 @@ class AppStatistics:
             self.stats[app_name]['crashes'] += 1
             self._save_stats()
 
+    def rename(self, old_name: str, new_name: str):
+        """Move stats to a new key when an app is renamed (INV-5). No-op if the
+        old key is absent or the new key already exists (don't merge histories)."""
+        if old_name and new_name and old_name in self.stats and new_name not in self.stats:
+            self.stats[new_name] = self.stats.pop(old_name)
+            self._save_stats()
+
     def get_stats(self, app_name: str) -> dict:
         s = self.stats.get(app_name)
         if not s:
@@ -1263,8 +1271,8 @@ class SimLauncherApp(ctk.CTk):
         self.profile_var = ctk.StringVar(value=self.data["current_profile"])
         self.combo_profiles = ctk.CTkOptionMenu(self.profile_frame, values=self.get_profile_names(), variable=self.profile_var, command=self.change_profile, width=160)
         self.combo_profiles.pack(side="left", padx=5)
-        ctk.CTkButton(self.profile_frame, text="+", width=35, fg_color="#27AE60", command=self.add_profile).pack(side="left", padx=2)
-        ctk.CTkButton(self.profile_frame, text="−", width=35, fg_color="#E74C3C", command=self.delete_profile).pack(side="left", padx=2)
+        self.btn_profile_menu = ctk.CTkButton(self.profile_frame, text="⋮", width=35, fg_color="#34495E", command=self._show_profile_menu)
+        self.btn_profile_menu.pack(side="left", padx=2)
         ctk.CTkButton(self.profile_frame, text="⚙", width=35, fg_color="#34495E", command=self.open_settings).pack(side="left", padx=2)
         ctk.CTkButton(self.profile_frame, text="⏻", width=35, fg_color="transparent", hover_color="#C0392B", border_width=1, command=self.exit_app).pack(side="left", padx=(8, 2))
         self.actions = ctk.CTkFrame(self, fg_color="transparent")
@@ -1365,34 +1373,119 @@ class SimLauncherApp(ctk.CTk):
             self.show_toast(f"Profile '{name}' created", "#27AE60")
 
     def delete_profile(self):
-        if self.data["current_profile"] == "Default":
-            messagebox.showwarning("Warning", "Cannot delete Default profile")
+        if len(self.data["profiles"]) <= 1:
+            messagebox.showwarning("Warning", "Can't delete the last profile")
             return
-        if messagebox.askyesno("Confirm", f"Delete '{self.data['current_profile']}'?"):
-            del self.data["profiles"][self.data["current_profile"]]
-            self.data["current_profile"] = "Default"
+        current = self.data["current_profile"]
+        if messagebox.askyesno("Confirm", f"Delete '{current}'?"):
+            del self.data["profiles"][current]
+            self.data["current_profile"] = self.get_profile_names()[0]
             self.combo_profiles.configure(values=self.get_profile_names())
-            self.profile_var.set("Default")
+            self.profile_var.set(self.data["current_profile"])
             self.save_data()
             self.refresh_list_ui()
             self.show_toast("Profile deleted", "#C0392B")
+
+    def _show_profile_menu(self):
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="New Profile…", command=self.add_profile)
+        menu.add_command(label="Rename Profile…", command=self.rename_profile)
+        menu.add_command(label="Duplicate Profile", command=self.duplicate_profile)
+        menu.add_command(label="Delete Profile", command=self.delete_profile)
+        menu.add_separator()
+        menu.add_command(label="Export Profile…", command=self.export_profile)
+        menu.add_command(label="Import Profile…", command=self.import_profile)
+        try:
+            x = self.btn_profile_menu.winfo_rootx()
+            y = self.btn_profile_menu.winfo_rooty() + self.btn_profile_menu.winfo_height()
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def rename_profile(self):
+        old = self.data["current_profile"]
+        name = simpledialog.askstring("Rename Profile", "New name:", initialvalue=old, parent=self)
+        if not name or not name.strip():
+            return
+        name = name.strip()
+        if name == old:
+            return
+        if any(k.lower() == name.lower() for k in self.data["profiles"]):
+            messagebox.showwarning("Warning", "A profile with that name already exists")
+            return
+        # Rebuild preserving key order, renamed key in place
+        self.data["profiles"] = {(name if k == old else k): v for k, v in self.data["profiles"].items()}
+        self.data["current_profile"] = name
+        self.combo_profiles.configure(values=self.get_profile_names())
+        self.profile_var.set(name)
+        self.save_data()
+        self.refresh_list_ui()
+        # INV-4: the desktop shortcut freezes the old profile name
+        self.show_toast(f"Renamed to '{name}'. If it had a shortcut, re-run install_shortcut.py --profile", "#27AE60", duration=6000)
+
+    def duplicate_profile(self):
+        src = self.data["current_profile"]
+        base = f"{src} (copy)"
+        name, i = base, 2
+        while name in self.data["profiles"]:
+            name = f"{base} ({i})"
+            i += 1
+        self.data["profiles"][name] = copy.deepcopy(self.data["profiles"][src])
+        self.data["current_profile"] = name
+        self.combo_profiles.configure(values=self.get_profile_names())
+        self.profile_var.set(name)
+        self.save_data()
+        self.refresh_list_ui()
+        self.show_toast(f"Duplicated to '{name}'", "#27AE60")
+
+    def export_profile(self):
+        name = self.data["current_profile"]
+        path = filedialog.asksaveasfilename(defaultextension=".json", initialfile=f"{name}.launchprofile.json",
+                                            filetypes=[("Launch Profile", "*.json")], parent=self)
+        if not path:
+            return
+        try:
+            payload = {"launch_profile_version": 1, "name": name, "apps": self.get_current_apps()}
+            with open(path, 'w') as f:
+                json.dump(payload, f, indent=2)
+            self.show_toast(f"Exported '{name}'", "#27AE60")
+        except Exception as e:
+            log_error("export_profile", e)
+            messagebox.showerror("Error", f"Export failed: {e}")
+
+    def import_profile(self):
+        path = filedialog.askopenfilename(filetypes=[("Launch Profile", "*.json"), ("All", "*.*")], parent=self)
+        if not path:
+            return
+        try:
+            with open(path, 'r') as f:
+                payload = json.load(f)
+            apps, missing = parse_profile_import(payload)
+        except Exception as e:
+            log_error("import_profile", e)
+            messagebox.showerror("Error", f"Import failed: {e}")
+            return
+        base = payload.get("name") or os.path.splitext(os.path.basename(path))[0]
+        name, i = base, 2
+        while name in self.data["profiles"]:
+            name = f"{base} ({i})"
+            i += 1
+        self.data["profiles"][name] = apps
+        self.data["current_profile"] = name
+        self.combo_profiles.configure(values=self.get_profile_names())
+        self.profile_var.set(name)
+        self.save_data()
+        self.refresh_list_ui()
+        msg = f"Imported '{name}'"
+        if missing:
+            msg += f" — {missing} app(s) have missing paths"
+        self.show_toast(msg, "#E67E22" if missing else "#27AE60", duration=5000)
 
     def add_app(self):
         path = filedialog.askopenfilename(filetypes=[("Executables", "*.exe"), ("All Files", "*.*")], parent=self)
         if path:
             name = os.path.splitext(os.path.basename(path))[0]
-            self.get_current_apps().append({
-                "name": name,
-                "path": os.path.abspath(path),
-                "delay": 0,
-                "priority": "Normal",
-                "affinity": [],
-                "admin": False,
-                "enabled": True,
-                "eco_mode": False,
-                "last_run": None,
-                "auto_restart": False
-            })
+            self.get_current_apps().append({**DEFAULT_APP, "name": name, "path": os.path.abspath(path)})
             self.save_data()
             self.refresh_list_ui()
             self.show_toast(f"Added {name}", "#27AE60")
@@ -1402,6 +1495,9 @@ class SimLauncherApp(ctk.CTk):
         def save(new_d):
             self.get_current_apps()[row.index] = new_d
             self.save_data()
+            # INV-5: keep stats history attached across an app rename
+            if old_data.get('name') != new_d.get('name'):
+                self.app_stats.rename(old_data.get('name'), new_d.get('name'))
             self._apply_edits_to_running(old_data, new_d)
             self.refresh_list_ui()
             self.show_toast("Settings saved", "#27AE60")
@@ -1794,6 +1890,31 @@ class SimLauncherApp(ctk.CTk):
 def validate_app_data(app):
     required = ['name', 'path', 'delay', 'priority', 'affinity', 'admin']
     return all(k in app for k in required)
+
+# Canonical defaults for a new app entry — shared by add_app and profile import
+DEFAULT_APP = {
+    "name": "", "path": "", "delay": 0, "priority": "Normal", "affinity": [],
+    "admin": False, "enabled": True, "eco_mode": False, "last_run": None, "auto_restart": False,
+}
+
+def parse_profile_import(payload) -> tuple:
+    """Validate an imported profile payload. Returns (apps, missing_count) or
+    raises ValueError on malformed input. Absent per-app fields are filled from
+    DEFAULT_APP; missing exe paths are allowed and counted, not rejected."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("apps"), list):
+        raise ValueError("Not a valid launch profile file")
+    apps = []
+    missing = 0
+    for entry in payload["apps"]:
+        if not isinstance(entry, dict) or not entry.get("name") or "path" not in entry:
+            raise ValueError("Profile contains an invalid app entry")
+        app = {**DEFAULT_APP, **entry}
+        if not validate_app_data(app):
+            raise ValueError("Profile contains an invalid app entry")
+        if not app.get("path") or not os.path.exists(app["path"]):
+            missing += 1
+        apps.append(app)
+    return apps, missing
 
 if __name__ == "__main__":
     # add_help=False + parse_known_args: under pythonw.exe there is no console,
